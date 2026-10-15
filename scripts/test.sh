@@ -27,6 +27,7 @@ swiftc \
   -module-cache-path "$module_cache" \
   -framework AppKit \
   "$project_dir/Sources/BearClone/MarkdownEditor.swift" \
+  "$project_dir/Sources/BearClone/AttachmentStore.swift" \
   "$project_dir/Tests/EditorTests.swift" \
   -o "$project_dir/.build/BearREAEditorTests"
 "$project_dir/.build/BearREAEditorTests"
@@ -43,3 +44,17 @@ swiftc -swift-version 5 -target "$(uname -m)-apple-macosx13.0" -parse-as-library
   "$project_dir/Sources/BearClone/CloudSync.swift" \
   "$project_dir/Tests/SyncTests.swift" -o "$project_dir/.build/SlothSyncTests"
 "$project_dir/.build/SlothSyncTests"
+
+swiftc -swift-version 5 -D SLOTH_TESTING -target "$(uname -m)-apple-macosx13.0" -parse-as-library \
+  -module-cache-path "$module_cache" -framework AppKit \
+  "$project_dir"/Sources/BearClone/*.swift "$project_dir/Tests/WorkspaceTests.swift" \
+  -o "$project_dir/.build/SlothWorkspaceTests"
+"$project_dir/.build/SlothWorkspaceTests" "$project_dir/.build/visual-review"
+
+swiftc -swift-version 5 -D SLOTH_TESTING -target "$(uname -m)-apple-macosx13.0" -parse-as-library \
+  -module-cache-path "$module_cache" -framework AppKit \
+  "$project_dir"/Sources/BearClone/*.swift "$project_dir/Tests/FileOperationTests.swift" \
+  -o "$project_dir/.build/SlothFileOperationTests"
+"$project_dir/.build/SlothFileOperationTests"
+
+python3 -m unittest discover -s "$project_dir/Tests" -p 'test_bear_migration.py'

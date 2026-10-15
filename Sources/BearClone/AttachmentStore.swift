@@ -19,6 +19,7 @@ struct ImportedAttachment {
 
 struct AttachmentReference {
     let range: NSRange
+    let labelRange: NSRange
     let destinationRange: NSRange
     let path: String
     let isImage: Bool
@@ -214,12 +215,14 @@ final class AttachmentStore {
     /// Inline Markdown file/image references, with escaped labels, angle-wrapped
     /// paths, spaces, optional quoted titles, and one level of nested parentheses.
     /// Fenced and inline code are excluded so examples do not become attachments.
-    func references(in text: String) -> [AttachmentReference] {
+    func references(in text: String) -> [AttachmentReference] { Self.references(in: text) }
+
+    /// The editor, importer, exporter and sync all use the same Markdown parser.
+    static func references(in text: String, ignoring code: [NSRange]? = nil) -> [AttachmentReference] {
         let source = text as NSString
         let full = NSRange(location: 0, length: source.length)
-        let pattern = #"(!?)\[((?:\\.|[^\]\\\n])*)\]\(\s*(<[^>\n]*>|(?:\\.|[^()\n]|\([^()\n]*\))*)\s*\)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-        let ignored = Self.codeRanges(in: text)
+        let regex = referenceExpression
+        let ignored = code ?? Self.codeRanges(in: text)
         return regex.matches(in: text, range: full).compactMap { match in
             guard !Self.isEscaped(at: match.range.location, source: source),
                   !ignored.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else { return nil }
@@ -236,7 +239,7 @@ final class AttachmentStore {
             guard !raw.isEmpty else { return nil }
             let decoded = Self.unescape(raw)
             let label = Self.unescape(source.substring(with: match.range(at: 2)))
-            return AttachmentReference(range: match.range, destinationRange: range,
+            return AttachmentReference(range: match.range, labelRange: match.range(at: 2), destinationRange: range,
                                        path: decoded.removingPercentEncoding ?? decoded,
                                        isImage: match.range(at: 1).length > 0, label: label)
         }
@@ -292,12 +295,40 @@ final class AttachmentStore {
         return slashes % 2 == 1
     }
 
-    private static func codeRanges(in text: String) -> [NSRange] {
+    private static let referenceExpression = try! NSRegularExpression(pattern: #"(!?)\[((?:\\.|[^\]\\\n])*)\]\([ \t]*(<[^>\n]*>|(?:\\.|[^()\n]|\([^()\n]*\))*)[ \t]*(?:["'][^"'\n]*["'][ \t]*)?\)"#)
+    private static let inlineCodeExpression = try! NSRegularExpression(pattern: #"(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)"#)
+
+    static func codeRanges(in text: String, fences: [NSRange]? = nil) -> [NSRange] {
+        let full = NSRange(location: 0, length: (text as NSString).length)
+        let blocks = fences ?? fencedCodeRanges(in: text)
+        return blocks + inlineCodeExpression.matches(in: text, range: full).map(\.range)
+    }
+
+    /// A single linear pass understands matching fence characters and longer
+    /// closing fences. Re-scanning the note prefix per task was quadratic.
+    static func fencedCodeRanges(in text: String) -> [NSRange] {
         let source = text as NSString
-        let full = NSRange(location: 0, length: source.length)
-        let patterns = [#"(?ms)^[ \t]*(`{3,}|~{3,})[^\n]*(?:\n|$).*?(?:^[ \t]*\1[ \t]*(?:\n|$)|\z)"#, #"(`+)[^\n]*?\1"#]
-        return patterns.flatMap { pattern in
-            (try? NSRegularExpression(pattern: pattern))?.matches(in: text, range: full).map(\.range) ?? []
+        var ranges: [NSRange] = []
+        var cursor = 0
+        var opening: (character: Character, count: Int, offset: Int)?
+        while cursor < source.length {
+            let lineRange = source.lineRange(for: NSRange(location: cursor, length: 0))
+            let line = source.substring(with: lineRange).trimmingCharacters(in: .whitespacesAndNewlines)
+            if let first = line.first, first == "`" || first == "~" {
+                let count = line.prefix(while: { $0 == first }).count
+                if count >= 3 {
+                    if let start = opening {
+                        if first == start.character, count >= start.count,
+                           line.dropFirst(count).trimmingCharacters(in: .whitespaces).isEmpty {
+                            ranges.append(NSRange(location: start.offset, length: NSMaxRange(lineRange) - start.offset))
+                            opening = nil
+                        }
+                    } else { opening = (first, count, lineRange.location) }
+                }
+            }
+            cursor = NSMaxRange(lineRange)
         }
+        if let start = opening { ranges.append(NSRange(location: start.offset, length: source.length - start.offset)) }
+        return ranges
     }
 }

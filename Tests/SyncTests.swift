@@ -91,7 +91,10 @@ enum SyncTests {
         try imageBytes.write(to: attachmentA.appendingPathComponent(attachmentName))
         notesA.append(Note(text: "# Image\n\n![An image](attachments/\(attachmentName))"))
         _ = try sync(reloadedA, &notesA)
-        _ = try sync(b, &notesB)
+        let receivedAttachment = try sync(b, &notesB)
+        expect(receivedAttachment.attachmentsChanged, "Newly received files request one editor refresh")
+        let unchangedAttachment = try sync(b, &notesB)
+        expect(!unchangedAttachment.attachmentsChanged, "Unchanged file exchange does not request editor refresh")
         expect(tryData(attachmentB.appendingPathComponent(attachmentName)) == imageBytes, "Attachment bytes arrive on the second device")
         expect(notesB.contains { $0.text.contains(attachmentName) }, "Attachment Markdown arrives with its note")
         expect(tryData(attachmentA.appendingPathComponent(attachmentName)) == imageBytes, "Original local attachment remains intact")
@@ -101,6 +104,21 @@ enum SyncTests {
         expect(tryData(shared.appendingPathComponent("attachments").appendingPathComponent(attachmentName)) == imageBytes, "Attachment collision never overwrites cloud")
         expect(tryData(attachmentB.appendingPathComponent(attachmentName)) == Data("different".utf8), "Attachment collision preserves B's differing file")
         try imageBytes.write(to: attachmentB.appendingPathComponent(attachmentName))
+
+        // Warm immutable-file caches eliminate repeated attachment reads, while
+        // inode/mtime/ctime stamps still detect replacement or in-place changes.
+        _ = try sync(b, &notesB)
+        _ = try sync(b, &notesB)
+        expect(b.revisionFilesRead == 0, "Unchanged revisions are not decoded again")
+        expect(b.attachmentBytesHashed == 0, "Unchanged attachment bytes are not rehashed")
+        let cachedURL = attachmentB.appendingPathComponent(attachmentName)
+        let oldDate = try manager.attributesOfItem(atPath: cachedURL.path)[.modificationDate] as! Date
+        let handle = try FileHandle(forWritingTo: cachedURL)
+        try handle.write(contentsOf: Data(repeating: 42, count: imageBytes.count)); try handle.close()
+        try manager.setAttributes([.modificationDate: oldDate], ofItemAtPath: cachedURL.path)
+        expectThrows("Same-length change with restored mtime invalidates attachment cache") { _ = try b.sync(notes: notesB) }
+        try imageBytes.write(to: cachedURL)
+        _ = try sync(b, &notesB)
 
         let beforeOffline = notesA
         let away = root.appendingPathComponent("disconnected-cloud")

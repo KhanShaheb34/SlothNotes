@@ -1,7 +1,7 @@
 import AppKit
 
 /// Run without showing a window:
-/// swiftc Sources/BearClone/MarkdownEditor.swift Tests/EditorTests.swift -o .build/editor-tests
+/// swiftc Sources/BearClone/MarkdownEditor.swift Sources/BearClone/AttachmentStore.swift Tests/EditorTests.swift -o .build/editor-tests
 /// .build/editor-tests
 @main
 enum EditorTests {
@@ -198,6 +198,32 @@ enum EditorTests {
         editor.textView.undoManager?.undo()
         expect(editor.text == "Tasks\n- [ ] ", "Composed text has one source-aware undo")
 
+        editor.setText("Outgoing\n- [ ] ")
+        editor.selectSourceRange(NSRange(location: (editor.text as NSString).length, length: 0), scroll: false)
+        editor.textView.setMarkedText("日本", selectedRange: NSRange(location: 2, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        let beforeSwitchChanges = changes.count
+        editor.setText("Incoming note\nDo not overwrite this")
+        expect(changes.count == beforeSwitchChanges + 1 && changes.last == "Outgoing\n- [ ] 日本", "Switching notes commits marked input to the outgoing document exactly once")
+        expect(editor.text == "Incoming note\nDo not overwrite this" && !editor.textView.hasMarkedText(), "The new note replaces the editor only after composition completes")
+        expect(editor.textView.undoManager?.isUndoRegistrationEnabled == true && editor.textView.undoManager?.canUndo == false,
+               "Switching during composition keeps native undo balanced and clears the old note history")
+        editor.selectSourceRange(NSRange(location: (editor.text as NSString).length, length: 0), scroll: false)
+        editor.textView.insertText(" safely", replacementRange: editor.textView.selectedRange())
+        expect(editor.text == "Incoming note\nDo not overwrite this safely", "Editing the new note after composition never includes outgoing text")
+        editor.textView.undoManager?.undo()
+        expect(editor.text == "Incoming note\nDo not overwrite this", "Undo after a composed note switch affects only the incoming note")
+
+        editor.setText("Draft\n")
+        editor.selectSourceRange(NSRange(location: 6, length: 0), scroll: false)
+        editor.textView.setMarkedText("বাংলা", selectedRange: NSRange(location: 5, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        let beforeFlushComposition = changes.count
+        editor.finishPendingComposition()
+        editor.finishPendingComposition()
+        expect(editor.text == "Draft\nবাংলা" && changes.count == beforeFlushComposition + 1,
+               "Lifecycle composition flush is idempotent and retains visible multilingual input")
+        editor.textView.undoManager?.undo()
+        expect(editor.text == "Draft\n", "An explicitly committed composition remains one undoable edit")
+
         editor.setText("Long note\n" + Array(repeating: "A paragraph with enough lines to scroll.", count: 100).joined(separator: "\n"))
         editor.layoutSubtreeIfNeeded()
         editor.textView.layoutManager?.ensureLayout(for: editor.textView.textContainer!)
@@ -211,11 +237,132 @@ enum EditorTests {
         expect(abs(clipView.bounds.origin.y - visibleOrigin.y) < 1, "Background attachment refresh preserves the visible scroll position")
         expect(editor.selectedSourceRange == selectedBeforeRefresh && changes.count == changesBeforeRefresh, "Attachment refresh preserves selection without emitting an edit")
 
+        // The display uses the same parser as import/export and synchronization.
+        editor.setText(#"![A \[bracket\] label](<attachments/test.png> "Caption")"# + "\n" + #"[A file](attachments/test.pdf "Title")"#)
+        expect(editor.renderedAttachmentCount == 2, "Escaped labels, angle paths and optional titles render as rich attachments")
+        expect(editor.textView.string == "\u{FFFC}\n\u{FFFC}", "Shared parser hides complete attachment syntax")
+        editor.setText("````swift\n~~~\n![Literal](attachments/test.png)\n`````\n![Visible](attachments/test.png)")
+        expect(editor.renderedAttachmentCount == 1, "Only matching fence characters close a code block, including longer fences")
+
+        // Local projection must move the remaining source/display ranges exactly,
+        // while keeping the existing attachment cells and their layout alive.
+        let incrementalSource = "Title\nFirst **paragraph** here.\n- [ ] Keep this task\n![Keep](attachments/test.png)\nLast paragraph."
+        editor.setText(incrementalSource)
+        let imageDisplay = (editor.textView.string as NSString).range(of: "\u{FFFC}", options: .backwards)
+        let originalImage = editor.textView.textStorage!.attribute(.attachment, at: imageDisplay.location, effectiveRange: nil) as AnyObject?
+        let firstParagraph = (editor.text as NSString).range(of: "First")
+        editor.selectSourceRange(firstParagraph, scroll: false)
+        editor.textView.insertText("A new 😊\nFirst", replacementRange: editor.textView.selectedRange())
+        let movedImageRange = (editor.textView.string as NSString).range(of: "\u{FFFC}", options: .backwards)
+        let movedImage = editor.textView.textStorage!.attribute(.attachment, at: movedImageRange.location, effectiveRange: nil) as AnyObject?
+        expect(originalImage === movedImage, "Editing another paragraph retains existing image cell and layout")
+        let movedTask = (editor.text as NSString).range(of: "[ ]")
+        expect(editor.toggleTodo(atUTF16Index: movedTask.location + 1), "Task source offsets track a preceding multiline Unicode edit")
+        expect(editor.text.contains("- [x] Keep this task"), "Moved checkbox toggles the correct source")
+        editor.textView.undoManager?.undo()
+        expect(editor.text == incrementalSource, "Grouped undo restores exact Markdown after local projection and checkbox edits")
+        editor.textView.undoManager?.redo()
+        expect(editor.text.hasPrefix("Title\nA new 😊\nFirst") && editor.text.contains("- [x]"), "Grouped redo reapplies source deltas correctly")
+
+        editor.setText("Title\nAlpha\nBeta\n- [ ] After")
+        let newline = (editor.text as NSString).range(of: "\nBeta")
+        editor.selectSourceRange(NSRange(location: newline.location, length: 1), scroll: false)
+        editor.textView.insertText("", replacementRange: editor.textView.selectedRange())
+        expect(editor.text.contains("AlphaBeta\n- [ ] After"), "Deleting a paragraph boundary reparses the joined paragraph")
+        expect(editor.renderedAttachmentCount == 1, "Joining adjacent paragraphs retains the following task")
+        editor.selectSourceRange(NSRange(location: 6, length: 0), scroll: false)
+        editor.textView.insertText("```\n", replacementRange: editor.textView.selectedRange())
+        expect(editor.renderedAttachmentCount == 0, "Adding a fence reparses following paragraphs and removes literal task projection")
+        editor.textView.undoManager?.undo()
+        expect(editor.text == "Title\nAlpha\nBeta\n- [ ] After", "Undoing structural edits restores all paragraphs and task projection")
+        expect(editor.renderedAttachmentCount == 1, "Undo restores projected task after fence deletion")
+
+        editor.setText("Title\n```swift\nlet value = 1\n```\n- [ ] After code")
+        let codeValue = (editor.text as NSString).range(of: "value")
+        editor.selectSourceRange(codeValue, scroll: false)
+        editor.textView.insertText("result", replacementRange: editor.textView.selectedRange())
+        let codeIndex = (editor.textView.string as NSString).range(of: "result").location
+        let codeFont = editor.textView.textStorage!.attribute(.font, at: codeIndex, effectiveRange: nil) as? NSFont
+        expect(codeFont?.isFixedPitch == true, "Typing within an existing fence keeps code styling")
+        expect(editor.renderedAttachmentCount == 1, "Editing fenced text preserves following tasks")
+        editor.selectSourceRange((editor.text as NSString).range(of: "After code"), scroll: false)
+        expect(editor.selectedSourceRange == (editor.text as NSString).range(of: "After code"), "Code edits correctly shift later source selections")
+
+        editor.setText("Title\nRead [[Another note|Alias]]\n```\n[[Literal]]\n```")
+        let wikiIndex = (editor.textView.string as NSString).range(of: "Another note").location
+        let wikiLink = editor.textView.textStorage!.attribute(.link, at: wikiIndex, effectiveRange: nil) as? URL
+        var openedNote: String?
+        editor.onOpenNoteLink = { openedNote = $0; return true }
+        expect(wikiLink != nil && editor.textView(editor.textView, clickedOnLink: wikiLink!, at: wikiIndex), "Wiki references are native clickable note links")
+        expect(openedNote == "Another note", "Wiki navigation resolves original title separately from alias")
+        let literalIndex = (editor.textView.string as NSString).range(of: "Literal").location
+        expect(editor.textView.textStorage!.attribute(.link, at: literalIndex, effectiveRange: nil) == nil, "Fenced wiki examples are not interactive links")
+
+        editor.setText("Title\n[PDF](attachments/test.pdf)")
+        let fileDisplay = (editor.textView.string as NSString).range(of: "\u{FFFC}")
+        let fileCell = editor.textView.textStorage!.attribute(.attachment, at: fileDisplay.location, effectiveRange: nil) as AnyObject?
+        editor.refreshAttachments()
+        let refreshedCell = editor.textView.textStorage!.attribute(.attachment, at: fileDisplay.location, effectiveRange: nil) as AnyObject?
+        expect(fileCell === refreshedCell, "Unchanged attachment refresh keeps existing layout and cells")
+        try! Data("%PDF-1.4\nChanged test fixture".utf8).write(to: fileURL)
+        editor.refreshAttachments()
+        let changedCell = editor.textView.textStorage!.attribute(.attachment, at: fileDisplay.location, effectiveRange: nil) as AnyObject?
+        expect(fileCell !== changedCell, "Changed attachment bytes refresh the visible preview")
+
+        // Mix structural edits and ordinary typing against a fresh parse. This
+        // catches offset drift after split/join operations and syntax changes.
+        let referenceEditor = MarkdownEditorView(frame: editor.frame)
+        referenceEditor.attachmentResolver = editor.attachmentResolver
+        editor.setText("Title\nParagraph with **bold** and `code`.\n- [ ] A task\n![Photo](attachments/test.png)\n~~~\nLiteral [file](attachments/test.pdf)\n~~~\nFinal paragraph.")
+        var random: UInt64 = 0x51_07_42
+        let insertions = ["x", "\n", "**", "- [ ] ", "```", "\n~~~\n", "😊", "[PDF](attachments/test.pdf)", "]", "[[Another note]]", ""]
+        for step in 0..<80 {
+            random = random &* 6364136223846793005 &+ 1
+            let source = editor.text as NSString
+            var location = Int((random >> 32) % UInt64(source.length + 1))
+            if location > 0 && location < source.length && (0xDC00...0xDFFF).contains(source.character(at: location)) { location -= 1 }
+            let length = min(step % 5, source.length - location)
+            editor.selectSourceRange(source.rangeOfComposedCharacterSequences(for: NSRange(location: location, length: length)), scroll: false)
+            let effectiveRange = editor.selectedSourceRange
+            let insertion = insertions[step % insertions.count]
+            let expected = source.replacingCharacters(in: effectiveRange, with: insertion)
+            editor.textView.insertText(insertion, replacementRange: editor.textView.selectedRange())
+            expect(editor.text == expected, "Mixed edit \(step) preserves raw Unicode Markdown")
+            referenceEditor.setText(expected)
+            expect(editor.textView.string == referenceEditor.textView.string && editor.renderedAttachmentCount == referenceEditor.renderedAttachmentCount,
+                   "Mixed edit \(step) matches a fresh projection after syntax changes")
+        }
+
+        editor.setText(#"""
+Links
+[Read \[this\]](<https://example.com/a?name=a%26b> "Title")
+[Email](mailto:hello@example.com)
+http://example.org/page.
+mailto:team@example.com
+[Local](file:///tmp/example.txt)
+[Bear](bear://x-callback-url/open-note?id=123)
+[Unsafe](javascript:alert)
+`https://example.net/inline`
+```
+https://example.net/fenced
+```
+"""#)
+        func link(at text: String) -> URL? {
+            let range = (editor.textView.string as NSString).range(of: text)
+            return range.location == NSNotFound ? nil : editor.textView.textStorage!.attribute(.link, at: range.location, effectiveRange: nil) as? URL
+        }
+        expect(link(at: #"Read \[this\]"#)?.absoluteString == "https://example.com/a?name=a%26b", "Markdown web labels use the shared parser and preserve percent-encoded query semantics")
+        expect(link(at: "Email")?.absoluteString == "mailto:hello@example.com", "Markdown mailto labels are native email links")
+        expect(link(at: "http://example.org/page")?.absoluteString == "http://example.org/page", "Bare web URLs exclude sentence punctuation")
+        expect(link(at: "mailto:team")?.absoluteString == "mailto:team@example.com", "Bare mailto URLs are native links")
+        expect(link(at: "Local") == nil && link(at: "Bear") == nil && link(at: "Unsafe") == nil, "Imported file, app and script schemes do not become actionable links")
+        expect(link(at: "https://example.net/inline") == nil && link(at: "https://example.net/fenced") == nil, "Inline and fenced code links remain literal examples")
+
         editor.isDark = true
         editor.fontSize = 18
         let rgb = editor.textView.insertionPointColor.usingColorSpace(.sRGB)!
-        expect(abs(rgb.redComponent - 68.0 / 255) < 0.001 && abs(rgb.greenComponent - 162.0 / 255) < 0.001,
-               "Dark Graphite uses its blue accent")
+        expect(abs(rgb.redComponent - 227.0 / 255) < 0.001 && abs(rgb.greenComponent - 107.0 / 255) < 0.001,
+               "Dark Graphite uses Sloth's warm coral accent")
         editor.setEditable(false)
         let readOnlyText = editor.text
         let editCount = changes.count

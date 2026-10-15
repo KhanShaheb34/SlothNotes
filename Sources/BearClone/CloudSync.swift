@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Darwin
 
 /// A local folder exchange is not proof of upload or delivery to another device.
 enum CloudSyncStatus {
@@ -57,6 +58,7 @@ struct CloudSyncResult {
     let notes: [Note]
     let conflictCount: Int
     let completedAt: Date
+    let attachmentsChanged: Bool
     fileprivate let stateData: Data
     fileprivate let destination: URL
 }
@@ -69,6 +71,26 @@ final class CloudSync {
     private let localDirectory: URL
     private let usesDefaultCloud: Bool
     private let manager = FileManager.default
+    private struct FileStamp: Equatable {
+        let device: Int32
+        let inode: UInt64
+        let size: Int64
+        let modifiedSeconds: Int
+        let modifiedNanoseconds: Int
+        let changedSeconds: Int
+        let changedNanoseconds: Int
+        init(_ url: URL) throws {
+            var info = stat()
+            guard lstat(url.path, &info) == 0 else { throw CocoaError(.fileReadUnknown) }
+            device = info.st_dev; inode = info.st_ino; size = info.st_size
+            modifiedSeconds = info.st_mtimespec.tv_sec; modifiedNanoseconds = info.st_mtimespec.tv_nsec
+            changedSeconds = info.st_ctimespec.tv_sec; changedNanoseconds = info.st_ctimespec.tv_nsec
+        }
+    }
+    private var revisionCache: [String: (FileStamp, SyncRevision)] = [:]
+    private var digestCache: [String: (FileStamp, String)] = [:]
+    private(set) var revisionFilesRead = 0
+    private(set) var attachmentBytesHashed: Int64 = 0
 
     static var iCloudDriveDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -84,6 +106,7 @@ final class CloudSync {
     /// The explicit cloudDirectory test/custom transport must already exist.
     /// The default creates only Sloth, never a replacement iCloud Drive root.
     func sync(notes: [Note], attachmentsDirectory: URL? = nil) throws -> CloudSyncResult {
+        revisionFilesRead = 0; attachmentBytesHashed = 0
         guard Set(notes.map(\.id)).count == notes.count else {
             throw CloudSyncError.invalid("Duplicate local note IDs; iCloud update was stopped.")
         }
@@ -112,8 +135,9 @@ final class CloudSync {
         var conflictCount = 0
         var work = records.keys.sorted { $0.uuidString < $1.uuidString }
         var visited = Set<UUID>()
-        while !work.isEmpty {
-            let noteID = work.removeFirst()
+        var workIndex = 0
+        while workIndex < work.count {
+            let noteID = work[workIndex]; workIndex += 1
             guard visited.insert(noteID).inserted, let group = records[noteID] else { continue }
             let referenced = Set(group.values.flatMap(\.parents))
             let heads = group.values.filter { !referenced.contains($0.id) }.sorted {
@@ -163,7 +187,7 @@ final class CloudSync {
             throw CloudSyncError.invalid("An iCloud update omitted local notes and was stopped. Local notes were preserved.")
         }
         let localAttachments = attachmentsDirectory ?? localDirectory.appendingPathComponent("attachments", isDirectory: true)
-        try exchangeAttachments(local: localAttachments)
+        let attachmentsChanged = try exchangeAttachments(local: localAttachments)
         try validateAttachments(in: Array(merged.values), directory: localAttachments)
         // Attachments arrive before a note that references them is published.
         for revision in pending { try writeRevision(revision) }
@@ -173,7 +197,7 @@ final class CloudSync {
             .filter { !localIDs.contains($0.id) }
             .sorted { $0.id.uuidString < $1.id.uuidString }
         return CloudSyncResult(notes: ordered, conflictCount: conflictCount,
-                               completedAt: Date(), stateData: try Self.encode(nextState), destination: stateURL)
+                               completedAt: Date(), attachmentsChanged: attachmentsChanged, stateData: try Self.encode(nextState), destination: stateURL)
     }
 
     /// Call only after all result.notes have been successfully saved locally.
@@ -182,7 +206,9 @@ final class CloudSync {
             throw CloudSyncError.invalid("This update belongs to a different iCloud folder.")
         }
         try manager.createDirectory(at: localDirectory, withIntermediateDirectories: true)
-        try result.stateData.write(to: stateURL, options: .atomic)
+        if (try? Data(contentsOf: stateURL)) != result.stateData {
+            try result.stateData.write(to: stateURL, options: .atomic)
+        }
     }
 
     private var stateURL: URL {
@@ -223,6 +249,8 @@ final class CloudSync {
         guard manager.fileExists(atPath: root.path) else { return [:] }
         try requireDirectory(root)
         var result: [UUID: [String: SyncRevision]] = [:]
+        var observed = Set<String>()
+        var waiting: Error?
         for directory in try children(root) {
             if directory.lastPathComponent == ".DS_Store" { continue }
             guard let noteID = UUID(uuidString: directory.lastPathComponent) else {
@@ -232,11 +260,19 @@ final class CloudSync {
             for file in try children(directory) {
                 if file.lastPathComponent == ".DS_Store" { continue }
                 try requireRegularFile(file)
-                try requestDownloadIfNeeded(file)
+                do { try requestDownloadIfNeeded(file) }
+                catch CloudSyncError.waiting(let message) { waiting = CloudSyncError.waiting(message); continue }
                 guard file.pathExtension == "json" else {
                     throw CloudSyncError.invalid("An unexpected revision file was found in iCloud Drive.")
                 }
+                observed.insert(file.path)
+                let stamp = try FileStamp(file)
+                if let cached = revisionCache[file.path], cached.0 == stamp {
+                    result[noteID, default: [:]][cached.1.id] = cached.1
+                    continue
+                }
                 let data = try coordinatedRead(file) { try Data(contentsOf: $0) }
+                revisionFilesRead += 1
                 let record = try Self.decode(SyncRevision.self, from: data)
                 let actual = try Self.revision(note: record.note, parents: record.parents)
                 guard record.schemaVersion == 1, record.note.id == noteID,
@@ -246,9 +282,12 @@ final class CloudSync {
                       file.deletingPathExtension().lastPathComponent == record.id else {
                     throw CloudSyncError.invalid("An iCloud note revision could not be verified. Local notes were preserved.")
                 }
+                revisionCache[file.path] = (stamp, record)
                 result[noteID, default: [:]][record.id] = record
             }
         }
+        revisionCache = revisionCache.filter { observed.contains($0.key) }
+        if let waiting { throw waiting }
         try validateGraph(result)
         return result
     }
@@ -308,7 +347,7 @@ final class CloudSync {
         }
     }
 
-    private func exchangeAttachments(local: URL) throws {
+    private func exchangeAttachments(local: URL) throws -> Bool {
         let remote = cloudDirectory.appendingPathComponent("attachments", isDirectory: true)
         try manager.createDirectory(at: local, withIntermediateDirectories: true)
         try requireDirectory(local)
@@ -316,15 +355,18 @@ final class CloudSync {
         try requireDirectory(remote)
         // Copy only. Imported UUID names are immutable; mismatched bytes stop the
         // update instead of replacing either copy. No cleanup deletes user files.
-        try copyMissing(from: local, to: remote)
-        try copyMissing(from: remote, to: local)
+        _ = try copyMissing(from: local, to: remote)
+        return try copyMissing(from: remote, to: local)
     }
 
-    private func copyMissing(from source: URL, to destination: URL) throws {
+    private func copyMissing(from source: URL, to destination: URL) throws -> Bool {
+        var copied = false
+        var waiting: Error?
         for file in try children(source) {
             if file.lastPathComponent == ".DS_Store" { continue }
             try requireRegularFile(file)
-            try requestDownloadIfNeeded(file)
+            do { try requestDownloadIfNeeded(file) }
+            catch CloudSyncError.waiting(let message) { waiting = CloudSyncError.waiting(message); continue }
             let target = destination.appendingPathComponent(file.lastPathComponent)
             var coordinationError: NSError?
             var operationError: Error?
@@ -335,7 +377,7 @@ final class CloudSync {
                     try self.requireRegularFile(readURL)
                     if self.manager.fileExists(atPath: writeURL.path) {
                         try self.requireRegularFile(writeURL)
-                        guard try Self.fileDigest(readURL) == Self.fileDigest(writeURL) else {
+                        guard try self.fileDigest(readURL) == self.fileDigest(writeURL) else {
                             throw CloudSyncError.invalid("Attachment conflict: \(file.lastPathComponent). Both files were preserved.")
                         }
                     } else {
@@ -345,11 +387,14 @@ final class CloudSync {
                         defer { try? self.manager.removeItem(at: temporary) }
                         try self.manager.copyItem(at: readURL, to: temporary)
                         try self.manager.moveItem(at: temporary, to: writeURL)
+                        copied = true
                     }
                 } catch { operationError = error }
             }
             if let error = coordinationError ?? operationError as NSError? { throw error }
         }
+        if let waiting { throw waiting }
+        return copied
     }
 
     private func validateAttachments(in notes: [Note], directory: URL) throws {
@@ -453,12 +498,18 @@ final class CloudSync {
 
     private static func fingerprint(_ note: Note) throws -> String { digest(try encode(note)) }
     private static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
-    private static func fileDigest(_ url: URL) throws -> String {
+    private func fileDigest(_ url: URL) throws -> String {
+        let stamp = try FileStamp(url)
+        if let cached = digestCache[url.path], cached.0 == stamp { return cached.1 }
         let file = try FileHandle(forReadingFrom: url)
         defer { try? file.close() }
         var hash = SHA256()
         while let data = try file.read(upToCount: 1_048_576), !data.isEmpty { hash.update(data: data) }
-        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+        let digest = hash.finalize().map { String(format: "%02x", $0) }.joined()
+        attachmentBytesHashed += stamp.size
+        if digestCache.count > 8192 { digestCache.removeAll(keepingCapacity: true) }
+        digestCache[url.path] = (stamp, digest)
+        return digest
     }
 
     private static func encode<T: Encodable>(_ value: T) throws -> Data {
@@ -493,6 +544,7 @@ final class CloudSyncController {
     var snapshot: (() -> [Note])?
     var apply: (([Note], [Note]) -> Bool)?
     var onUpdate: ((CloudSyncStatus) -> Void)?
+    var onAttachmentsChanged: (() -> Void)?
     private(set) var status: CloudSyncStatus = .disabled
     private let engine: CloudSync
     private let attachmentsDirectory: URL?
@@ -549,6 +601,7 @@ final class CloudSyncController {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.syncNow() }
                         return
                     }
+                    if result.attachmentsChanged { self.onAttachmentsChanged?() }
                     self.queue.async {
                         let commit = Result { try self.engine.commit(result) }
                         DispatchQueue.main.async {

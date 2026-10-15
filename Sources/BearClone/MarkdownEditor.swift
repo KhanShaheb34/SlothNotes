@@ -7,11 +7,12 @@ import Quartz
 final class MarkdownEditorView: NSView, NSTextViewDelegate {
     var onChange: ((String) -> Void)?
     var onSelectionChange: (() -> Void)?
+    var onOpenNoteLink: ((String) -> Bool)?
     var attachmentResolver: ((String) -> URL?)? { didSet { rebuildProjection() } }
     var onImportFiles: (([URL]) -> [String])?
     var onImportImage: ((Data) -> String?)?
-    var isDark = false { didSet { rebuildProjection() } }
-    var fontSize: CGFloat = 16 { didSet { rebuildProjection() } }
+    var isDark = false { didSet { if isDark != oldValue { rebuildProjection() } } }
+    var fontSize: CGFloat = 16 { didSet { if fontSize != oldValue { rebuildProjection() } } }
 
     let textView: NSTextView
     private let scrollView = NSScrollView()
@@ -19,6 +20,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     private var isUpdating = false
     private var isStyling = false
     private var tokens: [ProjectionToken] = []
+    private var fencedCodeRanges: [NSRange] = []
     private var attachmentPreview: AttachmentPreviewWindowController?
     private var composingSelection: NSRange?
     private var disabledCompositionUndo = false
@@ -27,6 +29,18 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     var text: String { markdown }
     var selectedSourceRange: NSRange { sourceRange(for: textView.selectedRange()) }
     var renderedAttachmentCount: Int { tokens.count }
+    var scrollPosition: NSPoint { scrollView.contentView.bounds.origin }
+
+    func restoreScrollPosition(_ position: NSPoint) {
+        layoutSubtreeIfNeeded()
+        let clip = scrollView.contentView
+        if let container = textView.textContainer {
+            textView.layoutManager?.ensureLayout(forBoundingRect: NSRect(origin: position, size: clip.bounds.size), in: container)
+        }
+        clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: position, size: clip.bounds.size)).origin)
+        scrollView.reflectScrolledClipView(clip)
+    }
+
 
     override init(frame frameRect: NSRect) {
         textView = MarkdownTextView(frame: .zero)
@@ -44,8 +58,8 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     private var foreground: NSColor { isDark ? NSColor(markdownHex: 0xDFE0E0) : NSColor(markdownHex: 0x444444) }
     private var secondary: NSColor { isDark ? NSColor(markdownHex: 0x969A9D) : NSColor(markdownHex: 0x929496) }
     private var marker: NSColor { isDark ? NSColor(markdownHex: 0x656A6E) : NSColor(markdownHex: 0xBDC0C2) }
-    private var accent: NSColor { isDark ? NSColor(markdownHex: 0x44A2E5) : NSColor(markdownHex: 0xDD4C4F) }
-    private var background: NSColor { isDark ? NSColor(markdownHex: 0x1D1E1F) : .white }
+    private var accent: NSColor { isDark ? NSColor(markdownHex: 0xE36B64) : NSColor(markdownHex: 0xD65A52) }
+    private var background: NSColor { isDark ? NSColor(markdownHex: 0x202122) : NSColor(markdownHex: 0xFFFEFC) }
     private var contentWidth: CGFloat {
         max(160, min(620, textView.bounds.width - textView.textContainerInset.width * 2))
     }
@@ -80,6 +94,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         textView.textContainer?.heightTracksTextView = false
         textView.textContainer?.containerSize = NSSize(width: 640, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.lineFragmentPadding = 0
+        textView.layoutManager?.allowsNonContiguousLayout = true
         textView.isContinuousSpellCheckingEnabled = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -126,6 +141,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
 
     /// A selected note starts a fresh undo history, even if its text is unchanged.
     func setText(_ text: String) {
+        finishPendingComposition()
         isUpdating = true
         markdown = text
         rebuildProjection(sourceSelection: NSRange(location: 0, length: 0))
@@ -134,8 +150,23 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         isUpdating = false
     }
 
+    /// Commit the visible input-method text to the outgoing Markdown document
+    /// before a note switch, shutdown flush, or formatting operation. Clearing
+    /// undo while composition has disabled registration corrupts NSUndoManager.
+    func finishPendingComposition() {
+        guard composingSelection != nil || textView.hasMarkedText() else { return }
+        if textView.hasMarkedText() { textView.unmarkText() }
+        finishComposition()
+    }
+
     /// Re-resolve downloaded or restored attachment files without resetting the caret or undo.
-    func refreshAttachments() { rebuildProjection() }
+    func refreshAttachments() {
+        guard tokens.contains(where: { token in
+            guard let path = token.path else { return false }
+            return attachmentIdentity(attachmentResolver?(path)) != token.identity
+        }) else { return }
+        rebuildProjection()
+    }
 
     func focus() { window?.makeFirstResponder(textView) }
     func setEditable(_ editable: Bool) { textView.isEditable = editable }
@@ -149,6 +180,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     /// Inserts source at the visual caret. Attachment snippets use their own paragraph.
     func insertMarkdown(_ snippet: String) {
         guard textView.isEditable else { return }
+        finishPendingComposition()
         let range = selectedSourceRange
         let source = markdown as NSString
         var insertion = snippet
@@ -188,6 +220,13 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             let selection = serializedSelection()
             commit(value, selection: selection, actionName: "Edit Note")
         }
+    }
+
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        guard let url = link as? URL, url.scheme == "sloth", url.host == "note" else { return false }
+        let target = String(url.path.dropFirst())
+        if onOpenNoteLink?(target) != true { NSSound.beep() }
+        return true
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
@@ -279,67 +318,136 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         let visibleOrigin = scrollView.contentView.bounds.origin
         let previousUpdating = isUpdating
         isUpdating = true
-        let source = markdown as NSString
-        tokens = []
-        var candidates: [(NSRange, ProjectionToken.Kind, Bool, String?, String?)] = []
-        let all = NSRange(location: 0, length: source.length)
-        if let expression = try? NSRegularExpression(pattern: "^([ \\t]*)([-+*][ \\t]+\\[[ xX]\\])([ \\t]*)(?=$|[^\\r\\n])", options: [.anchorsMatchLines]) {
-            for match in expression.matches(in: markdown, range: all) {
-                let start = match.range(at: 2).location
-                let range = NSRange(location: start, length: NSMaxRange(match.range) - start)
-                // A marker needs a separator, or to be the whole otherwise-empty line.
-                let end = NSMaxRange(match.range(at: 2))
-                let separator = end == source.length || [" ", "\t", "\r", "\n"].contains(source.substring(with: NSRange(location: min(end, max(0, source.length - 1)), length: source.length > 0 ? 1 : 0)))
-                if separator && !isInsideCodeFence(before: source.lineRange(for: match.range).location, in: source) {
-                    candidates.append((range, .checkbox, source.substring(with: range).lowercased().contains("[x]"), nil, nil))
-                }
-            }
-        }
-        if let expression = try? NSRegularExpression(pattern: "(!?)\\[([^\\]\\n]*)\\]\\((attachments/[^\\s)]+)\\)") {
-            for match in expression.matches(in: markdown, range: all) {
-                if !isInsideCodeFence(before: source.lineRange(for: match.range).location, in: source) && !isInsideInlineCode(at: match.range.location, in: source) {
-                    candidates.append((match.range, match.range(at: 1).length > 0 ? .image : .file, false,
-                                       source.substring(with: match.range(at: 3)), source.substring(with: match.range(at: 2))))
-                }
-            }
-        }
-        candidates.sort { $0.0.location < $1.0.location }
-        let result = NSMutableAttributedString()
-        var sourceCursor = 0
-        for (range, kind, checked, path, name) in candidates {
-            guard range.location >= sourceCursor else { continue }
-            result.append(NSAttributedString(string: source.substring(with: NSRange(location: sourceCursor, length: range.location - sourceCursor))))
-            let literal = source.substring(with: range)
-            let attachment = MarkdownAttachment(markdown: literal)
-            let url = path.flatMap { attachmentResolver?($0) }
-            let cell: NSTextAttachmentCell
-            if kind == .checkbox {
-                cell = CheckboxAttachmentCell(checked: checked, size: fontSize, dark: isDark, accent: accent)
-            } else {
-                cell = FileAttachmentCell(url: url, name: name ?? "Attachment", isImage: kind == .image,
-                                          width: contentWidth, dark: isDark)
-            }
-            attachment.attachmentCell = cell
-            tokens.append(ProjectionToken(sourceRange: range, displayRange: NSRange(location: result.length, length: 1), kind: kind, url: url, name: name, attachment: attachment))
-            result.append(NSAttributedString(attachment: attachment))
-            sourceCursor = NSMaxRange(range)
-        }
-        result.append(NSAttributedString(string: source.substring(from: sourceCursor)))
-        textView.textStorage?.setAttributedString(result)
+        fencedCodeRanges = AttachmentStore.fencedCodeRanges(in: markdown)
+        let projected = projection(for: markdown, sourceOffset: 0, displayOffset: 0)
+        tokens = projected.tokens
+        textView.textStorage?.setAttributedString(projected.text)
         restyle()
-        textView.setSelectedRange(displayRange(for: clamped(selection, length: source.length)))
+        textView.setSelectedRange(displayRange(for: clamped(selection, length: (markdown as NSString).length)))
         textView.typingAttributes = defaultAttributes()
-        if let container = textView.textContainer { textView.layoutManager?.ensureLayout(for: container) }
+        // TextKit lays out visible paragraphs on demand. Forcing ensureLayout on
+        // the entire container makes a single key in a long note block the UI.
         scrollView.contentView.scroll(to: visibleOrigin)
         scrollView.reflectScrolledClipView(scrollView.contentView)
         isUpdating = previousUpdating
     }
 
-    private func isInsideInlineCode(at offset: Int, in source: NSString) -> Bool {
-        let line = source.lineRange(for: NSRange(location: offset, length: 0))
-        let prefix = source.substring(with: NSRange(location: line.location, length: offset - line.location))
-        return prefix.filter { $0 == "`" }.count % 2 == 1
+    private static var expressions: [String: NSRegularExpression] = [:]
+    private static func expression(_ pattern: String, options: NSRegularExpression.Options = []) -> NSRegularExpression {
+        let key = "\(options.rawValue):\(pattern)"
+        if let cached = expressions[key] { return cached }
+        let regex = try! NSRegularExpression(pattern: pattern, options: options)
+        expressions[key] = regex
+        return regex
     }
+
+    private func projection(for value: String, sourceOffset: Int, displayOffset: Int) -> (text: NSAttributedString, tokens: [ProjectionToken]) {
+        let source = value as NSString
+        let all = NSRange(location: 0, length: source.length)
+        let localFences = fencedCodeRanges.compactMap { fence -> NSRange? in
+            let intersection = NSIntersectionRange(fence, NSRange(location: sourceOffset, length: source.length))
+            return intersection.length > 0 ? NSRange(location: intersection.location - sourceOffset, length: intersection.length) : nil
+        }
+        let ignored = AttachmentStore.codeRanges(in: value, fences: localFences)
+        var candidates: [(NSRange, ProjectionToken.Kind, Bool, String?, String?)] = []
+        let checklist = Self.expression("^([ \\t]*)([-+*][ \\t]+\\[[ xX]\\])([ \\t]*)(?=$|[^\\r\\n])", options: [.anchorsMatchLines])
+        for match in checklist.matches(in: value, range: all) {
+            let start = match.range(at: 2).location
+            let range = NSRange(location: start, length: NSMaxRange(match.range) - start)
+            let end = NSMaxRange(match.range(at: 2))
+            let separator = end == source.length || [32, 9, 13, 10].contains(Int(source.character(at: end)))
+            if separator && !ignored.contains(where: { NSIntersectionRange($0, range).length > 0 }) {
+                candidates.append((range, .checkbox, source.substring(with: range).lowercased().contains("[x]"), nil, nil))
+            }
+        }
+        for reference in AttachmentStore.references(in: value, ignoring: ignored) where reference.path.hasPrefix("attachments/") {
+            candidates.append((reference.range, reference.isImage ? .image : .file, false, reference.path, reference.label))
+        }
+        candidates.sort { $0.0.location < $1.0.location }
+        let result = NSMutableAttributedString()
+        var resultTokens: [ProjectionToken] = []
+        var cursor = 0
+        for (range, kind, checked, path, name) in candidates {
+            guard range.location >= cursor else { continue }
+            result.append(NSAttributedString(string: source.substring(with: NSRange(location: cursor, length: range.location - cursor))))
+            let attachment = MarkdownAttachment(markdown: source.substring(with: range))
+            let url = path.flatMap { attachmentResolver?($0) }
+            if kind == .checkbox {
+                attachment.attachmentCell = CheckboxAttachmentCell(checked: checked, size: fontSize, dark: isDark, accent: accent)
+            } else {
+                let cell = FileAttachmentCell(url: url, name: name ?? "Attachment", isImage: kind == .image,
+                                              width: contentWidth, dark: isDark)
+                cell.onPreviewReady = { [weak self, weak attachment] in
+                    guard let self, let attachment,
+                          let token = self.tokens.first(where: { $0.attachment === attachment }) else { return }
+                    self.textView.layoutManager?.invalidateDisplay(forCharacterRange: token.displayRange)
+                    self.textView.needsDisplay = true
+                }
+                attachment.attachmentCell = cell
+            }
+            resultTokens.append(ProjectionToken(sourceRange: NSRange(location: sourceOffset + range.location, length: range.length),
+                                                displayRange: NSRange(location: displayOffset + result.length, length: 1), kind: kind,
+                                                path: path, url: url, name: name, identity: attachmentIdentity(url), attachment: attachment))
+            result.append(NSAttributedString(attachment: attachment))
+            cursor = NSMaxRange(range)
+        }
+        result.append(NSAttributedString(string: source.substring(from: cursor)))
+        return (result, resultTokens)
+    }
+
+    private func attachmentIdentity(_ url: URL?) -> String? {
+        guard let url else { return nil }
+        let values = try? URL(fileURLWithPath: url.path).resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        return "\(url.path)|\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)|\(values?.fileSize ?? -1)"
+    }
+
+    /// Rebuild only touched paragraphs, preserving the layout, attachment cells,
+    /// and attributes in the rest of a long note. Fence edits can affect all
+    /// following paragraphs and deliberately use the full parser instead.
+    private func updateProjection(previous: String, edit: SourceEdit, selection: NSRange) -> Bool {
+        guard let storage = textView.textStorage, composingSelection == nil, !textView.hasMarkedText() else { return false }
+        let old = previous as NSString
+        let first = old.lineRange(for: NSRange(location: edit.range.location, length: 0))
+        let last = old.lineRange(for: NSRange(location: NSMaxRange(edit.range), length: 0))
+        let oldRegion = NSRange(location: first.location, length: NSMaxRange(last) - first.location)
+        let replacementLength = (edit.replacement as NSString).length
+        let delta = replacementLength - edit.range.length
+        let newRegion = NSRange(location: oldRegion.location, length: oldRegion.length + delta)
+        let new = markdown as NSString
+        guard newRegion.length >= 0, NSMaxRange(newRegion) <= new.length else { return false }
+        let oldFragment = old.substring(with: oldRegion)
+        let fragment = new.substring(with: newRegion)
+        let fence = Self.expression("^[ \\t]*(`{3,}|~{3,})", options: [.anchorsMatchLines])
+        if fence.firstMatch(in: oldFragment, range: NSRange(location: 0, length: (oldFragment as NSString).length)) != nil ||
+            fence.firstMatch(in: fragment, range: NSRange(location: 0, length: (fragment as NSString).length)) != nil { return false }
+        // Tokens still refer to the previous source here, so the old region can
+        // be translated before offsets are adjusted for the edit.
+        let oldDisplay = displayRange(for: oldRegion)
+        fencedCodeRanges = fencedCodeRanges.map { range in
+            if range.location >= NSMaxRange(edit.range) { return NSRange(location: range.location + delta, length: range.length) }
+            if NSMaxRange(range) > edit.range.location { return NSRange(location: range.location, length: range.length + delta) }
+            return range
+        }
+        let projected = projection(for: fragment, sourceOffset: newRegion.location, displayOffset: oldDisplay.location)
+        let displayDelta = projected.text.length - oldDisplay.length
+        var updated = tokens.filter { NSMaxRange($0.sourceRange) <= oldRegion.location }
+        updated.append(contentsOf: projected.tokens)
+        updated.append(contentsOf: tokens.filter { $0.sourceRange.location >= NSMaxRange(oldRegion) }.map { token in
+            var moved = token
+            moved.sourceRange.location += delta
+            moved.displayRange.location += displayDelta
+            return moved
+        })
+        tokens = updated
+        storage.beginEditing()
+        storage.replaceCharacters(in: oldDisplay, with: projected.text)
+        restyle(in: NSRange(location: oldDisplay.location, length: projected.text.length))
+        storage.endEditing()
+        textView.setSelectedRange(displayRange(for: clamped(selection, length: new.length)))
+        textView.typingAttributes = defaultAttributes()
+        return true
+    }
+
     private func defaultAttributes() -> [NSAttributedString.Key: Any] {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = fontSize * 0.42
@@ -347,10 +455,20 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         return [.font: bodyFont, .foregroundColor: foreground, .paragraphStyle: paragraph]
     }
 
-    private func restyle() {
+    /// Only user-clicked web and email links are handed to the system. Imported
+    /// file, app and custom-scheme URLs remain portable source text.
+    private func webLink(_ destination: String) -> URL? {
+        guard let url = URL(string: destination), let scheme = url.scheme?.lowercased(),
+              ["http", "https", "mailto"].contains(scheme) else { return nil }
+        if scheme == "mailto" { return url.path.isEmpty ? nil : url }
+        return url.host?.isEmpty == false ? url : nil
+    }
+
+    private func restyle(in requestedRange: NSRange? = nil) {
         guard !isStyling else { return }
         textView.backgroundColor = background
         textView.insertionPointColor = accent
+        textView.linkTextAttributes = [.foregroundColor: accent, .underlineStyle: 0]
         textView.selectedTextAttributes = [.backgroundColor: isDark ? NSColor(markdownHex: 0x454D56) : NSColor(markdownHex: 0xD3E6FB)]
         scrollView.backgroundColor = background
         layer?.backgroundColor = background.cgColor
@@ -358,20 +476,21 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         isStyling = true
         defer { isStyling = false }
         let content = textView.string as NSString
-        let full = NSRange(location: 0, length: content.length)
+        let full = requestedRange ?? NSRange(location: 0, length: content.length)
         let selections = textView.selectedRanges
         storage.beginEditing()
         storage.setAttributes(defaultAttributes(), range: full)
 
         func matches(_ pattern: String, options: NSRegularExpression.Options = [.anchorsMatchLines], _ body: (NSTextCheckingResult) -> Void) {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return }
+            let regex = Self.expression(pattern, options: options)
             regex.enumerateMatches(in: content as String, range: full) { result, _, _ in
                 if let result = result { body(result) }
             }
         }
         func style(_ attributes: [NSAttributedString.Key: Any], _ range: NSRange) {
             guard range.location != NSNotFound, NSMaxRange(range) <= content.length else { return }
-            storage.addAttributes(attributes, range: range)
+            let intersection = NSIntersectionRange(full, range)
+            if intersection.length > 0 { storage.addAttributes(attributes, range: intersection) }
         }
         func fontTrait(_ trait: NSFontTraitMask, _ range: NSRange) {
             storage.enumerateAttribute(.font, in: range) { value, fontRange, _ in
@@ -421,14 +540,31 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             style([.foregroundColor: accent, .backgroundColor: accent.withAlphaComponent(0.08)], match.range(at: 2))
         }
         matches("(\\[\\[)([^\\]\\n]+)(\\]\\])", options: []) { match in
-            style([.foregroundColor: accent], match.range(at: 2)); dim(match, [1, 3])
+            let target = content.substring(with: match.range(at: 2)).components(separatedBy: "|").first ?? ""
+            if let encoded = target.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let url = URL(string: "sloth://note/" + encoded) {
+                style([.foregroundColor: accent, .link: url], match.range(at: 2))
+            }
+            dim(match, [1, 3])
         }
         matches("(\\[)([^\\]\\n]+)(\\]\\()([^\\s)]+)(\\))", options: []) { match in
             style([.foregroundColor: accent], match.range(at: 2))
             style([.foregroundColor: secondary], match.range(at: 4)); dim(match, [1, 3, 5])
         }
-        matches("https?://[^\\s<>\\])]+", options: []) { match in
-            style([.foregroundColor: accent], match.range)
+        let scopedText = content.substring(with: full)
+        for reference in AttachmentStore.references(in: scopedText) {
+            let literal = (scopedText as NSString).substring(with: reference.destinationRange)
+            let destination = literal.replacingOccurrences(of: #"\\([\\`*_{}\[\]()#+.!<> -])"#, with: "$1", options: .regularExpression)
+            if let url = webLink(destination) {
+                let range = NSRange(location: full.location + reference.labelRange.location, length: reference.labelRange.length)
+                style([.foregroundColor: accent, .link: url], range)
+            }
+        }
+        matches("(?:https?://|mailto:)[^\\s<>\\])]+", options: []) { match in
+            var destination = content.substring(with: match.range)
+            while let last = destination.last, ".,;".contains(last) { destination.removeLast() }
+            if let url = webLink(destination) {
+                style([.foregroundColor: accent, .link: url], NSRange(location: match.range.location, length: (destination as NSString).length))
+            }
         }
         matches("^([ \\t]*)([-+*]|[0-9]+\\.)([ \\t]+)") { match in
             style([.foregroundColor: accent], match.range(at: 2))
@@ -450,14 +586,18 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         let codeFont = NSFont.monospacedSystemFont(ofSize: fontSize * 0.88, weight: .regular)
         matches("(?<!`)(`)([^`\\n]+)(`)(?!`)", options: []) { match in
             style([.font: codeFont, .foregroundColor: foreground, .backgroundColor: codeBackground], match.range)
+            storage.removeAttribute(.link, range: match.range)
             dim(match, [1, 3])
         }
-        // Code blocks are styled last, so Markdown punctuation inside is ordinary code.
-        matches("^(```[^\\n]*\\n)([\\s\\S]*?)(^```[ \\t]*$|\\z)") { match in
-            style([.font: codeFont, .foregroundColor: foreground, .backgroundColor: codeBackground, .strikethroughStyle: 0], match.range)
-            dim(match, [1, 3])
+        // Cached source fence ranges remain valid across ordinary paragraph edits.
+        for sourceRange in fencedCodeRanges {
+            let range = displayRange(for: sourceRange)
+            guard NSIntersectionRange(range, full).length > 0 else { continue }
+            style([.font: codeFont, .foregroundColor: foreground, .backgroundColor: codeBackground, .strikethroughStyle: 0], range)
+            storage.removeAttribute(.link, range: NSIntersectionRange(range, full))
+            style([.foregroundColor: marker], content.lineRange(for: NSRange(location: range.location, length: 0)))
         }
-        for token in tokens {
+        for token in tokens where NSIntersectionRange(content.lineRange(for: token.displayRange), full).length > 0 {
             style([.attachment: token.attachment, .font: bodyFont], token.displayRange)
             if token.kind == .checkbox {
                 let line = content.lineRange(for: token.displayRange)
@@ -497,32 +637,13 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     }
 
     private func isInsideCodeFence(before lineStart: Int, in source: NSString) -> Bool {
-        guard lineStart > 0 else { return false }
-        let preceding = source.substring(to: lineStart)
-        var openingCharacter: Character?
-        var openingLength = 0
-        for line in preceding.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard let first = trimmed.first, first == "`" || first == "~" else { continue }
-            let runLength = trimmed.prefix(while: { $0 == first }).count
-            guard runLength >= 3 else { continue }
-            if let current = openingCharacter {
-                if first == current, runLength >= openingLength,
-                   trimmed.dropFirst(runLength).trimmingCharacters(in: .whitespaces).isEmpty {
-                    openingCharacter = nil
-                    openingLength = 0
-                }
-            } else {
-                openingCharacter = first
-                openingLength = runLength
-            }
-        }
-        return openingCharacter != nil
+        fencedCodeRanges.contains { NSLocationInRange(lineStart, $0) }
     }
 
     /// Inserts or toggles Markdown around the current selection as one undoable edit.
     func applyFormat(_ format: String) {
         guard textView.isEditable else { return }
+        finishPendingComposition()
         focus()
         let source = markdown as NSString
         let range = selectedSourceRange
@@ -603,22 +724,35 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
                          actionName: String = "Format Note", scrollToSelection: Bool = true) -> Bool {
         guard textView.isEditable, NSMaxRange(range) <= (markdown as NSString).length else { return false }
         let next = (markdown as NSString).replacingCharacters(in: range, with: replacement)
-        commit(next, selection: selection, actionName: actionName)
+        commit(next, selection: selection, actionName: actionName, edit: SourceEdit(range: range, replacement: replacement))
         if scrollToSelection { textView.scrollRangeToVisible(textView.selectedRange()) }
         return true
     }
 
-    private func commit(_ value: String, selection: NSRange, actionName: String, previousSelection: NSRange? = nil) {
+    private func commit(_ value: String, selection: NSRange, actionName: String, previousSelection: NSRange? = nil, edit: SourceEdit? = nil) {
         guard value != markdown else { selectSourceRange(selection); return }
         let previousText = markdown
         let previousRange = previousSelection ?? selectedSourceRange
         let previousUpdating = isUpdating
         isUpdating = true
         markdown = value
-        rebuildProjection(sourceSelection: selection)
+        if let edit, updateProjection(previous: previousText, edit: edit, selection: selection) {
+            // Paragraph-local projection kept unaffected TextKit layout intact.
+        } else { rebuildProjection(sourceSelection: selection) }
         isUpdating = previousUpdating
-        textView.undoManager?.registerUndo(withTarget: self) { target in
-            target.commit(previousText, selection: previousRange, actionName: actionName)
+        if let edit {
+            let reverse = SourceEdit(range: NSRange(location: edit.range.location, length: (edit.replacement as NSString).length),
+                                     replacement: (previousText as NSString).substring(with: edit.range))
+            // Store only the changed text for ordinary edits. Capturing a full
+            // note per keystroke made long editing sessions grow without bound.
+            textView.undoManager?.registerUndo(withTarget: self) { target in
+                target.replace(reverse.range, with: reverse.replacement, selection: previousRange,
+                               actionName: actionName, scrollToSelection: false)
+            }
+        } else {
+            textView.undoManager?.registerUndo(withTarget: self) { target in
+                target.commit(previousText, selection: previousRange, actionName: actionName)
+            }
         }
         textView.undoManager?.setActionName(actionName)
         onChange?(markdown)
@@ -648,13 +782,20 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
 
 }
 
+private struct SourceEdit {
+    let range: NSRange
+    let replacement: String
+}
+
 private struct ProjectionToken {
     enum Kind { case checkbox, image, file }
-    let sourceRange: NSRange
-    let displayRange: NSRange
+    var sourceRange: NSRange
+    var displayRange: NSRange
     let kind: Kind
+    let path: String?
     let url: URL?
     let name: String?
+    let identity: String?
     let attachment: MarkdownAttachment
 }
 
@@ -768,38 +909,75 @@ private final class FileAttachmentCell: NSTextAttachmentCell {
         return cache
     }()
 
-    private static func thumbnail(for url: URL) -> NSImage? {
-        let metadata = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-        let key = "\(url.path)|\(metadata?.contentModificationDate?.timeIntervalSince1970 ?? 0)|\(metadata?.fileSize ?? 0)" as NSString
+    private static let thumbnailQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "Sloth attachment previews"
+        queue.qualityOfService = .userInitiated
+        queue.maxConcurrentOperationCount = 2
+        return queue
+    }()
+
+    private static func thumbnail(for url: URL, key: NSString) -> NSImage? {
         if let image = thumbnailCache.object(forKey: key) { return image }
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceThumbnailMaxPixelSize: 1400,
-                kCGImageSourceCreateThumbnailWithTransform: true
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true
               ] as CFDictionary) else { return nil }
         let thumbnail = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
         thumbnailCache.setObject(thumbnail, forKey: key, cost: image.width * image.height * 4)
         return thumbnail
     }
-    private let url: URL?
     private let name: String
     private let dark: Bool
     private let width: CGFloat
-    private let preview: NSImage?
+    private var preview: NSImage?
+    private let imageSize: NSSize?
     private let icon: NSImage?
+    private let detail: String
+    var onPreviewReady: (() -> Void)?
 
     init(url: URL?, name: String, isImage: Bool, width: CGFloat, dark: Bool) {
-        self.url = url; self.name = name; self.width = max(160, min(width, 620)); self.dark = dark
-        preview = isImage ? url.flatMap { Self.thumbnail(for: $0) } : nil
-        icon = url.map { NSWorkspace.shared.icon(forFile: $0.path) }
+        self.name = name; self.width = max(160, min(width, 620)); self.dark = dark
+        let metadata = url.flatMap { try? URL(fileURLWithPath: $0.path).resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) }
+        let key = "\(url?.path ?? "missing")|\(metadata?.contentModificationDate?.timeIntervalSince1970 ?? 0)|\(metadata?.fileSize ?? -1)" as NSString
+        var dimensions: NSSize?
+        if isImage, let url,
+           let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+           CGImageSourceGetType(source).map({ ($0 as String) != "com.adobe.pdf" }) == true,
+           let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+           let pixelsWide = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+           let pixelsHigh = properties[kCGImagePropertyPixelHeight] as? NSNumber,
+           pixelsWide.doubleValue > 0, pixelsHigh.doubleValue > 0 {
+            let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+            dimensions = orientation >= 5 ? NSSize(width: pixelsHigh.doubleValue, height: pixelsWide.doubleValue) :
+                NSSize(width: pixelsWide.doubleValue, height: pixelsHigh.doubleValue)
+        }
+        imageSize = dimensions
+        preview = dimensions == nil ? nil : Self.thumbnailCache.object(forKey: key)
+        icon = dimensions == nil ? url.map { NSWorkspace.shared.icon(forFile: $0.path) } : nil
+        if let url, let bytes = metadata?.fileSize {
+            let type = url.pathExtension.isEmpty ? "FILE" : url.pathExtension.uppercased()
+            detail = type + " · " + ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) + " · Click to preview"
+        } else { detail = "Attachment unavailable" }
         super.init(textCell: name)
+        if dimensions != nil, preview == nil, let url {
+            Self.thumbnailQueue.addOperation { [weak self] in
+                guard self != nil, let thumbnail = Self.thumbnail(for: url, key: key) else { return }
+                DispatchQueue.main.async { [weak self] in
+                    self?.preview = thumbnail
+                    self?.onPreviewReady?()
+                }
+            }
+        }
     }
     required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func cellSize() -> NSSize {
-        guard let preview else { return NSSize(width: min(width, 440), height: 66) }
-        let scale = min(width / max(1, preview.size.width), 340 / max(1, preview.size.height), 1)
-        return NSSize(width: max(80, preview.size.width * scale), height: max(56, preview.size.height * scale) + 8)
+        guard let size = imageSize else { return NSSize(width: min(width, 440), height: 66) }
+        let scale = min(width / max(1, size.width), 340 / max(1, size.height), 1)
+        return NSSize(width: max(1, size.width * scale), height: max(1, size.height * scale) + 8)
     }
     override func cellBaselineOffset() -> NSPoint { .zero }
     override func draw(withFrame cellFrame: NSRect, in controlView: NSView?) {
@@ -814,18 +992,18 @@ private final class FileAttachmentCell: NSTextAttachmentCell {
         }
         (dark ? NSColor(markdownHex: 0x2C2E30) : NSColor(markdownHex: 0xF5F5F5)).setFill(); path.fill()
         (dark ? NSColor(markdownHex: 0x424548) : NSColor(markdownHex: 0xE4E4E4)).setStroke(); path.lineWidth = 1; path.stroke()
+        if imageSize != nil {
+            let symbol = NSImage(systemSymbolName: "photo", accessibilityDescription: "Loading image preview")
+            symbol?.draw(in: NSRect(x: frame.midX - 12, y: frame.midY - 12, width: 24, height: 24), from: .zero,
+                         operation: .sourceOver, fraction: 0.35, respectFlipped: true, hints: nil)
+            return
+        }
         icon?.draw(in: NSRect(x: frame.minX + 12, y: frame.minY + 12, width: 32, height: 32), from: .zero,
                    operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byTruncatingMiddle
         let color = dark ? NSColor(markdownHex: 0xDFE0E0) : NSColor(markdownHex: 0x444444)
         (name as NSString).draw(in: NSRect(x: frame.minX + 56, y: frame.minY + 10, width: frame.width - 68, height: 20),
                                withAttributes: [.font: NSFont.systemFont(ofSize: 14, weight: .medium), .foregroundColor: color, .paragraphStyle: paragraph])
-        let detail: String
-        if let url, FileManager.default.fileExists(atPath: url.path) {
-            let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-            let type = url.pathExtension.isEmpty ? "FILE" : url.pathExtension.uppercased()
-            detail = type + " · " + ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) + " · Click to preview"
-        } else { detail = "Attachment unavailable" }
         (detail as NSString).draw(in: NSRect(x: frame.minX + 56, y: frame.minY + 31, width: frame.width - 68, height: 17),
                                  withAttributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: paragraph])
     }
@@ -844,18 +1022,29 @@ private final class MarkdownTextView: NSTextView {
 
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         onCompositionStart?()
+        let wasHandling = isHandlingMarkedText
         isHandlingMarkedText = true
         super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
-        isHandlingMarkedText = false
+        isHandlingMarkedText = wasHandling
     }
 
-    override func unmarkText() { super.unmarkText(); onCompositionEnd?() }
+    override func unmarkText() {
+        // AppKit may recursively remove/reinsert marked text while unmarking.
+        // Preserve the outer transaction across every native input callback.
+        let wasHandling = isHandlingMarkedText
+        isHandlingMarkedText = true
+        super.unmarkText()
+        isHandlingMarkedText = wasHandling
+        if !wasHandling { onCompositionEnd?() }
+    }
 
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
         let finishing = hasMarkedText()
+        let wasHandling = isHandlingMarkedText
         if finishing { isHandlingMarkedText = true }
         super.insertText(insertString, replacementRange: replacementRange)
-        if finishing { isHandlingMarkedText = false; onCompositionEnd?() }
+        isHandlingMarkedText = wasHandling
+        if finishing && !wasHandling { onCompositionEnd?() }
     }
 
     override func insertNewline(_ sender: Any?) {
@@ -901,9 +1090,10 @@ private final class MarkdownTextView: NSTextView {
             _ = onPasteFiles?(urls); return true
         }
         if let data = pasteboard.data(forType: .png) { _ = onPasteImage?(data); return true }
-        if let data = pasteboard.data(forType: .tiff), let representation = NSBitmapImageRep(data: data),
-           let png = representation.representation(using: .png, properties: [:]) {
-            _ = onPasteImage?(png); return true
+        if let data = pasteboard.data(forType: .tiff) {
+            // The attachment importer decodes and normalizes image data on its
+            // worker queue. Pasting a large TIFF must not decode on the UI thread.
+            _ = onPasteImage?(data); return true
         }
         return false
     }
@@ -926,9 +1116,9 @@ private final class MarkdownTextView: NSTextView {
 
     override func mouseDown(with event: NSEvent) {
         if event.clickCount == 1, let manager = layoutManager, let container = textContainer {
-            manager.ensureLayout(for: container)
             let location = convert(event.locationInWindow, from: nil)
             let point = NSPoint(x: location.x - textContainerOrigin.x, y: location.y - textContainerOrigin.y)
+            manager.ensureLayout(forBoundingRect: NSRect(origin: point, size: NSSize(width: 1, height: 1)), in: container)
             let glyph = manager.glyphIndex(for: point, in: container)
             if glyph < manager.numberOfGlyphs {
                 let bounds = manager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)

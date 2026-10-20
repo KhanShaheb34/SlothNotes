@@ -4,6 +4,8 @@ project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mkdir -p "$project_dir/.build/module-cache"
 swiftc -O -swift-version 5 -target "$(uname -m)-apple-macosx13.0" -parse-as-library \
   -module-cache-path "$project_dir/.build/module-cache" -framework AppKit \
+  "$project_dir/Sources/Sloth/MarkdownTagSyntax.swift" \
+  "$project_dir/Sources/Sloth/MarkdownSyntaxHighlighter.swift" \
   "$project_dir/Sources/Sloth/MarkdownEditor.swift" "$project_dir/Sources/Sloth/MarkdownLayoutManager.swift" \
   "$project_dir/Sources/Sloth/MarkdownTable.swift" \
   "$project_dir/Sources/Sloth/MarkdownPresentation.swift" "$project_dir/Sources/Sloth/AttachmentStore.swift" \

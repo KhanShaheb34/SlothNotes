@@ -218,7 +218,9 @@ enum MarkdownPresentation {
     private static let headingPrefix = try! NSRegularExpression(pattern: #"^ {0,3}(#{1,6})(?:[ \t]+|$)"#)
     private static let foldSuffix = try! NSRegularExpression(pattern: #"(<!--[ \t]*(\{[^\r\n]*\})[ \t]*-->)[ \t]*$"#)
     private static let headingSuffix = try! NSRegularExpression(pattern: #"[ \t]+#+[ \t]*$"#)
-    private static let delimiterPattern = try! NSRegularExpression(pattern: #"^:?-{3,}:?$"#)
+    // Compact table exports can use a single hyphen, especially `:-:` for a
+    // centered column. Any nonempty hyphen run is a valid delimiter cell.
+    private static let delimiterPattern = try! NSRegularExpression(pattern: #"^:?-+:?$"#)
 
     private static func heading(_ line: Line, in source: NSString) -> Heading? {
         let value = source.substring(with: line.contentRange)

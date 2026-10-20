@@ -113,6 +113,104 @@ enum EditorPresentationTests {
         expect(editor.textView.string.contains("Readable in Trash"), "Read-only unfolding reveals the body")
         expect(editor.text == trashFold, "Read-only unfolding never modifies the stored note")
         editor.setEditable(true)
+        let bulk = "# Root\nIntro\n## One\nBody one\n### Child\nChild body\n## Two ##\nBody two\n"
+        editor.setText(bulk)
+        window.undoManager?.beginUndoGrouping()
+        editor.setAllHeadingsFolded(true)
+        window.undoManager?.endUndoGrouping()
+        expect(!editor.textView.string.contains("Body one"), "Fold All hides every section body")
+        expect(MarkdownPresentation.parse(editor.text).headings.allSatisfy(\.isFolded), "Fold All also remembers nested heading states")
+        window.undoManager?.undo()
+        expect(editor.text == bulk, "One undo restores all heading states exactly")
+        window.undoManager?.redo()
+        let allFolded = editor.text
+        editor.setAllHeadingsFolded(false)
+        expect(editor.text == bulk, "Unfold All restores exact Markdown including closing heading hashes")
+        editor.selectSourceRange((bulk as NSString).range(of: "Body one"), scroll: false)
+        editor.toggleCurrentHeadingFold()
+        expect(!editor.textView.string.contains("Body one") && editor.textView.string.contains("Body two"), "The folding command targets the section containing the caret")
+        editor.setText(allFolded)
+        editor.setEditable(false)
+        editor.setAllHeadingsFolded(false)
+        expect(editor.textView.string.contains("Child body"), "Unfold All works in read-only notes")
+        expect(editor.text == allFolded, "Read-only bulk folding preserves stored Markdown")
+        editor.setEditable(true)
+        editor.setText(bulk)
+        editor.layoutSubtreeIfNeeded()
+        if let manager = editor.textView.layoutManager, let container = editor.textView.textContainer {
+            manager.ensureLayout(for: container)
+            let headingSource = (editor.text as NSString).range(of: "## Two")
+            editor.selectSourceRange(headingSource)
+            editor.layoutSubtreeIfNeeded()
+            let index = (editor.textView.string as NSString).range(of: "## Two").location
+            let glyph = manager.glyphIndexForCharacter(at: index)
+            let line = manager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            let arrow = NSPoint(x: editor.textView.textContainerOrigin.x - 14, y: editor.textView.textContainerOrigin.y + line.minY + 13)
+            let click = NSEvent.mouseEvent(with: .leftMouseDown, location: editor.textView.convert(arrow, to: nil), modifierFlags: [], timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+            let release = NSEvent.mouseEvent(with: .leftMouseUp, location: click.locationInWindow, modifierFlags: [], timestamp: 0.1,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 2, clickCount: 1, pressure: 0)!
+            NSApp.postEvent(release, atStart: false)
+            editor.textView.mouseDown(with: click)
+            expect(!editor.textView.string.contains("Body two") && editor.textView.string.contains("Body one"), "Clicking a visible heading arrow folds precisely its section")
+            editor.setText(bulk)
+            editor.selectSourceRange((bulk as NSString).range(of: "Body one"), scroll: false)
+            manager.ensureLayout(for: container)
+            let headingPoint = NSPoint(x: editor.textView.textContainerOrigin.x + 100, y: editor.textView.textContainerOrigin.y + line.minY + 13)
+            let rightClick = NSEvent.mouseEvent(with: .rightMouseDown, location: editor.textView.convert(headingPoint, to: nil), modifierFlags: [], timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 2, clickCount: 1, pressure: 1)!
+            if let menu = editor.textView.menu(for: rightClick), let action = menu.item(withTitle: "Fold Section") {
+                menu.performActionForItem(at: menu.index(of: action))
+                expect(!editor.textView.string.contains("Body two") && editor.textView.string.contains("Body one"), "Context-menu folding targets the clicked section even when the caret is elsewhere")
+            } else { expect(false, "Heading context menu offers folding") }
+        } else { expect(false, "Native heading controls have layout") }
+        let numbered = "# Note\nIssue #17 and #১৭ with #work2026 and #project/123.\nEnd"
+        editor.setText(numbered)
+        for plain in ["#17", "#১৭"] {
+            let range = (editor.textView.string as NSString).range(of: plain)
+            expect(editor.textView.textStorage?.attribute(.backgroundColor, at: range.location, effectiveRange: nil) == nil, "Numeric references are plain text, not highlighted tags")
+        }
+        let named = (editor.textView.string as NSString).range(of: "#work2026")
+        expect(editor.textView.textStorage?.attribute(.backgroundColor, at: named.location, effectiveRange: nil) != nil, "Named tags with numbers keep their tag styling")
+        expect(editor.text == numbered, "Tag filtering never removes numeric references from notes")
+        let colored = "# Note\n\n```rust\npub struct CacheKey {\n    enabled: bool, // বাংলা comment\n    value: u8,\n}\n```\nEnd"
+        editor.setText(colored)
+        editor.selectSourceRange(NSRange(location: (colored as NSString).length, length: 0), scroll: false)
+        let keywordIndex = (editor.textView.string as NSString).range(of: "pub").location
+        let commentIndex = (editor.textView.string as NSString).range(of: "// বাংলা").location
+        let keywordColor = editor.textView.textStorage?.attribute(.foregroundColor, at: keywordIndex, effectiveRange: nil) as? NSColor
+        let commentColor = editor.textView.textStorage?.attribute(.foregroundColor, at: commentIndex, effectiveRange: nil) as? NSColor
+        expect(keywordColor != nil && commentColor != nil && keywordColor != commentColor, "Rust keywords and comments receive distinct syntax colors in the native editor")
+        editor.isDark = true
+        let darkKeyword = editor.textView.textStorage?.attribute(.foregroundColor, at: keywordIndex, effectiveRange: nil) as? NSColor
+        expect(darkKeyword != keywordColor, "Code highlighting adapts to dark appearance")
+        editor.isDark = false
+        let codeInsertion = (editor.text as NSString).range(of: "enabled").location
+        editor.selectSourceRange(NSRange(location: codeInsertion, length: 0))
+        editor.textView.insertText("🦥 ", replacementRange: editor.textView.selectedRange())
+        let shiftedComment = (editor.textView.string as NSString).range(of: "// বাংলা").location
+        expect(editor.textView.textStorage?.attribute(.foregroundColor, at: shiftedComment, effectiveRange: nil) as? NSColor == commentColor, "Incremental Unicode edits preserve subsequent code-token positions")
+        expect(editor.text.contains("🦥 enabled: bool, // বাংলা comment"), "Highlighting never rewrites code or Unicode source")
+        editor.setText("# Tags\n#work2026# #১২৩বাংলা #_17 #-17\nEnd")
+        for name in ["#work2026#", "#১২৩বাংলা"] {
+            let range = (editor.textView.string as NSString).range(of: name)
+            expect(editor.textView.textStorage?.attribute(.backgroundColor, at: range.location, effectiveRange: nil) != nil, "Editor highlights exactly the same named and closed tags as the sidebar")
+        }
+        for name in ["#_17", "#-17"] {
+            let range = (editor.textView.string as NSString).range(of: name)
+            expect(editor.textView.textStorage?.attribute(.backgroundColor, at: range.location, effectiveRange: nil) == nil, "Invalid unclosed tags never receive misleading editor styling")
+        }
+        editor.setText("# Code\n```rust\nlet first = 1;\nlet second = 2;\n```\n")
+        let firstKeyword = (editor.text as NSString).range(of: "let first").location
+        editor.selectSourceRange(NSRange(location: firstKeyword, length: 0))
+        editor.textView.insertText("/* ", replacementRange: editor.textView.selectedRange())
+        var secondKeyword = (editor.textView.string as NSString).range(of: "let second").location
+        expect(editor.textView.textStorage?.attribute(.foregroundColor, at: secondKeyword, effectiveRange: nil) as? NSColor == commentColor, "Opening a multiline comment recolors following code lines immediately")
+        let endOfFirst = NSMaxRange((editor.text as NSString).range(of: "let first = 1;"))
+        editor.selectSourceRange(NSRange(location: endOfFirst, length: 0))
+        editor.textView.insertText(" */", replacementRange: editor.textView.selectedRange())
+        secondKeyword = (editor.textView.string as NSString).range(of: "let second").location
+        expect(editor.textView.textStorage?.attribute(.foregroundColor, at: secondKeyword, effectiveRange: nil) as? NSColor == keywordColor, "Closing a multiline comment restores following keyword colors immediately")
         let fixture = "# Markdown, quietly\n\nA **bold** thought, *gentle emphasis*, `inline code`, and a [useful link](https://example.com).\n\n## A folded section <!-- {\"fold\":true} -->\nThis body should not appear.\n\n## Code that stays readable\n\n```swift\nlet greeting = \"Hello, Sloth\"\n\nprint(greeting)\n```\n\n> A quiet quote with **emphasis**.\n\n---\n\nThe original Markdown is preserved."
         editor.setText(fixture)
         editor.selectSourceRange(NSRange(location: (fixture as NSString).length, length: 0), scroll: false)

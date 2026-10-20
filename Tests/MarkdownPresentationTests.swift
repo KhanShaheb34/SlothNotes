@@ -63,7 +63,13 @@ enum MarkdownPresentationTests {
         expect(uneven.rows[1].cells.count == 2 && uneven.rows[1].cells[1].contentRange.length == 0, "Short rows receive an empty cell range")
         expect(uneven.rows[2].cells.count == 2, "Extra source cells are not presented as extra columns")
         expect(MarkdownPresentation.parse("A | B\n--- | --- | ---\n").tables.isEmpty, "Header and delimiter column counts must agree")
-        expect(MarkdownPresentation.parse("A | B\n-- | ---\n").tables.isEmpty, "Table delimiters require at least three hyphens")
+        let compactSource = "| Service | Monthly | Annual | Paid |\n| --------------------- | ----------: | ---------: | :-: |\n| Example | 12 | 144 | Yes |\n"
+        let compact = MarkdownPresentation.parse(compactSource).tables
+        expect(compact.count == 1, "Compact centered delimiters from existing Markdown notes render as tables")
+        expect(compact[0].alignments == [.unspecified, .right, .right, .center], "Compact delimiters preserve per-column alignment")
+        expect(slice(compactSource, compact[0].rows[1].cells[3].contentRange) == "Yes", "Compact delimiter parsing keeps editable source cell ranges")
+        expect(MarkdownPresentation.parse("A | B\n- | --\n1 | 2\n").tables.count == 1, "A nonempty run of hyphens is sufficient for a compact delimiter cell")
+        expect(MarkdownPresentation.parse("A | B\n: | ---\n").tables.isEmpty, "Table delimiters still require a hyphen in every column")
         expect(MarkdownPresentation.parse("text\n---\n").tables.isEmpty, "Setext-like text is not mistaken for a one-column table")
         expect(MarkdownPresentation.parse("| A |\n| --- |\n| B |\n").tables.first?.columnCount == 1, "Explicit one-column tables are valid")
         let multiCode = "| A | B |\n| --- | --- |\n| ``a`|b`` | c |\n"

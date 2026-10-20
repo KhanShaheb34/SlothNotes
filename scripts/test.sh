@@ -14,6 +14,7 @@ swiftc \
   -parse-as-library \
   -module-cache-path "$module_cache" \
   -framework Foundation \
+  "$project_dir/Sources/Sloth/MarkdownTagSyntax.swift" \
   "$project_dir/Sources/Sloth/NoteStore.swift" \
   "$project_dir/Tests/ModelTests.swift" \
   -o "$test_binary"
@@ -26,6 +27,8 @@ swiftc \
   -parse-as-library \
   -module-cache-path "$module_cache" \
   -framework AppKit \
+  "$project_dir/Sources/Sloth/MarkdownTagSyntax.swift" \
+  "$project_dir/Sources/Sloth/MarkdownSyntaxHighlighter.swift" \
   "$project_dir/Sources/Sloth/MarkdownEditor.swift" \
   "$project_dir/Sources/Sloth/MarkdownLayoutManager.swift" \
   "$project_dir/Sources/Sloth/MarkdownTable.swift" \
@@ -34,9 +37,11 @@ swiftc \
   "$project_dir/Tests/EditorTests.swift" \
   -o "$project_dir/.build/SlothEditorTests"
 
-for suite in MarkdownPresentation MarkdownLayout EditorPresentation MarkdownTable EditorTable; do
+for suite in MarkdownPresentation MarkdownLayout EditorPresentation MarkdownTable EditorTable MarkdownSyntaxHighlighter; do
   swiftc -swift-version 5 -target "$(uname -m)-apple-macosx13.0" -parse-as-library \
     -module-cache-path "$module_cache" -framework AppKit \
+    "$project_dir/Sources/Sloth/MarkdownTagSyntax.swift" \
+    "$project_dir/Sources/Sloth/MarkdownSyntaxHighlighter.swift" \
     "$project_dir/Sources/Sloth/MarkdownEditor.swift" \
     "$project_dir/Sources/Sloth/MarkdownLayoutManager.swift" \
     "$project_dir/Sources/Sloth/MarkdownTable.swift" \
@@ -55,6 +60,7 @@ swiftc -swift-version 5 -target "$(uname -m)-apple-macosx13.0" -parse-as-library
 
 swiftc -swift-version 5 -target "$(uname -m)-apple-macosx13.0" -parse-as-library \
   -module-cache-path "$module_cache" -framework AppKit \
+  "$project_dir/Sources/Sloth/MarkdownTagSyntax.swift" \
   "$project_dir/Sources/Sloth/NoteStore.swift" "$project_dir/Sources/Sloth/AttachmentStore.swift" \
   "$project_dir/Sources/Sloth/CloudSync.swift" \
   "$project_dir/Tests/SyncTests.swift" -o "$project_dir/.build/SlothSyncTests"

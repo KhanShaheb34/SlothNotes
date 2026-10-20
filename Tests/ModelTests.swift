@@ -70,6 +70,49 @@ enum ModelTests {
         expect(Note(text: ##"\#hidden \\#visible \\\#also-hidden"##).tags == ["visible"], "Odd backslashes escape hashes while even backslashes retain tags")
         expect(Note(text: "#first is ordinary prose before #second").tags == ["first", "second"], "An ordinary hashtag cannot terminate an earlier closed tag")
         expect(Note(text: "#two words# #\"quoted\"# #বাংলা/ভাবনা").tags == ["two words", "\"quoted\"", "বাংলা/ভাবনা"], "Closing boundary keeps quoted, multiword, and Unicode tags intact")
+        let sharedTagSource = "🦥 #work2026# #১২৩বাংলা #cafe\u{301} #Work #work #project/123 #2026/notes"
+        let sharedTags = MarkdownTagSyntax.matches(in: sharedTagSource)
+        expect(sharedTags.map(\.name) == ["work2026", "১২৩বাংলা", "cafe\u{301}", "Work", "work", "project/123", "2026/notes"],
+               "Shared matcher preserves closed tags, combining marks, mixed labels, paths and repeated occurrences")
+        expect(sharedTags.map { (sharedTagSource as NSString).substring(with: $0.range) } == ["#work2026#", "#১২৩বাংলা", "#cafe\u{301}", "#Work", "#work", "#project/123", "#2026/notes"],
+               "Shared tag ranges include exact hashtag delimiters and use UTF-16 offsets")
+        expect(sharedTags.first?.range.location == 3, "Tag ranges account for a preceding emoji surrogate pair")
+        expect(Note(text: sharedTagSource).tags == ["work2026", "১২৩বাংলা", "cafe\u{301}", "Work", "project/123", "2026/notes"],
+               "Note indexing deduplicates shared matches without changing the first spelling")
+        expect(MarkdownTagSyntax.matches(in: "#_17\n#-17\n#_work\n#-work").isEmpty,
+               "Unclosed tags must start with a letter or number")
+        expect(MarkdownTagSyntax.matches(in: "#_work# #-work#").map(\.name) == ["_work", "-work"],
+               "Explicitly closed tags retain their existing broader label syntax")
+        let sharedEscapes = ##"\#hidden \\#visible \\\#also-hidden"##
+        expect(MarkdownTagSyntax.matches(in: sharedEscapes).map(\.name) == ["visible"],
+               "Shared matching excludes odd escaped hashes and retains even escapes")
+        expect(MarkdownTagSyntax.matches(in: "#17 #১৭ #17# #17/23").isEmpty,
+               "Shared matching excludes numeric tags before editor styling or model indexing")
+        expect(MarkdownTagSyntax.matches(in: "(#work),#two words#\n# Heading\n## Heading ##").map(\.name) == ["work", "two words"],
+               "Shared matching accepts punctuation boundaries and excludes heading markers")
+        let numericSource = "References #123 #১৭ #１２３ #١٢٣ #Ⅻ #½ #123# #১২৩# #123/456 #১৭/৪২#"
+        let numericTags = Note(text: numericSource)
+        expect(numericTags.tags.isEmpty, "Standalone Unicode numbers and entirely numeric paths stay literal")
+        expect(numericTags.text == numericSource, "Ignoring numeric tags preserves the exact note text")
+        expect(NoteMetadata(numericTags).tags.isEmpty, "Cached metadata shares numeric-tag semantics")
+        expect(Note(text: "#a123 #123a #project/123 #2026/notes #১২৩বাংলা").tags == ["a123", "123a", "project/123", "2026/notes", "১২৩বাংলা"],
+               "Mixed labels and named nested paths retain numeric components")
+        expect(Note(text: "#123 #work #Work #2026/notes").tags == ["work", "2026/notes"],
+               "Numeric filtering preserves ordinary deduplication")
+        let numberStore = NoteStore(directory: directory.appendingPathComponent("numeric-tags"), seed: false)
+        let referenceNote = numberStore.create(text: "# Reference\nTicket #123 and #১৭ remain searchable.")
+        let namedNote = numberStore.create(text: "# Project\n#project123 #project/123 #2026/notes")
+        expect(numberStore.tags == ["2026/notes", "project/123", "project123"], "Numeric references do not appear in sidebar tag labels")
+        expect(numberStore.sectionCounts["tag:123"] == nil && numberStore.sectionCounts["tag:১৭"] == nil,
+               "Numeric references do not create sidebar tag counts")
+        expect(numberStore.filtered(section: "untagged").map(\.id) == [referenceNote.id], "Notes containing only numeric references remain untagged")
+        expect(numberStore.filtered(section: "all", query: "#123").map(\.id) == [referenceNote.id], "Numeric hash searches use preserved literal text")
+        expect(numberStore.filtered(section: "all", query: "#১৭").map(\.id) == [referenceNote.id], "Unicode numeric hash searches use literal text")
+        expect(numberStore.filtered(section: "all", query: "#project/123").map(\.id) == [namedNote.id], "Named nested numeric tags still support tag search")
+        expect(numberStore.filtered(section: "tag:2026").map(\.id) == [namedNote.id], "Intentional numeric ancestors of named paths still filter descendants")
+        expect(numberStore.flush(), "Numeric-reference fixtures save without rewriting notes")
+        expect(NoteStore(directory: directory.appendingPathComponent("numeric-tags"), seed: false).note(id: referenceNote.id)?.text == referenceNote.text,
+               "Persistence retains numeric references verbatim")
         expect(Note().title == "Untitled note", "Empty title fallback")
         expect(Note(text: "# ").title == "Untitled note", "Empty Markdown heading uses title fallback")
         expect(Note(text: "hello café world's").wordCount == 3, "Unicode words and apostrophes")

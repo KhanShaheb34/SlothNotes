@@ -22,7 +22,6 @@ struct Note: Codable, Identifiable, Equatable {
         self.trashed = trashed
     }
 
-    private static let tagRegex = try! NSRegularExpression(pattern: #"(?<![\p{L}\p{N}_/])#(?:([^\s#](?:[^#\r\n]*?[^\s#])?)#(?![\p{L}\p{M}\p{N}_])|([\p{L}\p{N}][\p{L}\p{M}\p{N}_-]*(?:/[\p{L}\p{N}][\p{L}\p{M}\p{N}_-]*)*))"#)
     fileprivate static let todoRegex = try! NSRegularExpression(pattern: #"(?m)^[ \t]*[-*+][ \t]+\[ \]"#)
     private static let wordRegex = try! NSRegularExpression(pattern: #"[\p{L}\p{N}][\p{L}\p{M}\p{N}]*(?:[’'][\p{L}\p{M}\p{N}]+)*"#)
     private static let inlineCodeRegex = try! NSRegularExpression(pattern: #"`[^`\n]*`"#)
@@ -63,28 +62,9 @@ struct Note: Codable, Identifiable, Equatable {
     var tags: [String] { Self.tags(in: Self.prose(text)) }
 
     fileprivate static func tags(in source: String) -> [String] {
-        // A heading's # is followed by whitespace, so it is never a tag.
         var seen = Set<String>()
-        let utf16 = source as NSString
-        return tagRegex.matches(in: source, range: NSRange(source.startIndex..<source.endIndex, in: source)).compactMap { match in
-            // Markdown uses an odd run of backslashes to escape a literal #.
-            // Even runs escape each other and leave the following tag active.
-            var preceding = match.range.location
-            var backslashes = 0
-            while preceding > 0, utf16.character(at: preceding - 1) == 92 {
-                backslashes += 1
-                preceding -= 1
-            }
-            guard backslashes.isMultiple(of: 2) else { return nil }
-            let capture = match.range(at: 1).location != NSNotFound ? match.range(at: 1) : match.range(at: 2)
-            guard let range = Range(capture, in: source) else { return nil }
-            let tag = String(source[range])
-            // A hierarchy must have a real label at every level. In particular,
-            // #/# and #///# are literal text, not zero-component tag paths.
-            guard tag.split(separator: "/", omittingEmptySubsequences: false).allSatisfy({
-                !$0.trimmingCharacters(in: .whitespaces).isEmpty
-            }) else { return nil }
-            return seen.insert(tag.lowercased()).inserted ? tag : nil
+        return MarkdownTagSyntax.matches(in: source).compactMap { match in
+            seen.insert(match.name.lowercased()).inserted ? match.name : nil
         }
     }
 
@@ -396,7 +376,7 @@ final class NoteStore {
                     if term.hasPrefix("#"), term.count > 1 {
                         var tag = String(term.dropFirst())
                         if tag.hasSuffix("#") { tag.removeLast() }
-                        return containsTag(note, tag: tag)
+                        if MarkdownTagSyntax.isIndexableTag(tag) { return containsTag(note, tag: tag) }
                     }
                     return note.text.localizedStandardContains(term)
                 }

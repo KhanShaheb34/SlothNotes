@@ -177,6 +177,10 @@ import AppKit
         controller.showStyles = false; controller.toggleStyles()
         expect(controller.formatBar.isHidden, "Styles toggle cannot expose editing controls in Trash")
         try verifySyncPreservesTableDraft(controller, directory: directory)
+        controller.setupMenus()
+        let formatMenu = NSApp.mainMenu?.item(withTitle: "Format")?.submenu
+        expect(formatMenu?.item(withTitle: "Toggle Folding")?.keyEquivalent == "'", "Format menu exposes the familiar folding shortcut")
+        expect(formatMenu?.item(withTitle: "Fold All Headings") != nil && formatMenu?.item(withTitle: "Unfold All Headings") != nil, "Bulk folding is discoverable in the Format menu")
         expect(controller.store.flush(), "Workspace test library saves")
         controller.window.delegate = nil; controller.window.orderOut(nil)
         print("Passed \(assertions) workspace assertions; native view snapshots: \(snapshotDirectory.path)")

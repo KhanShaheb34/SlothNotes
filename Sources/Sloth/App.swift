@@ -483,6 +483,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     @objc func toggleFocus() { showList.toggle(); showSidebar = showList; root.needsLayout = true }
     @objc func toggleStyles() { showStyles.toggle(); showSelected(); root.needsLayout = true }
     @objc func formatCommand(_ sender: NSMenuItem) { if let f = sender.representedObject as? String { editor.applyFormat(f) } }
+    @objc func toggleFolding() { editor.toggleCurrentHeadingFold() }
+    @objc func foldAllHeadings() { editor.setAllHeadingsFolded(true) }
+    @objc func unfoldAllHeadings() { editor.setAllHeadingsFolded(false) }
     @objc func toggleTheme() { Palette.dark.toggle(); defaults.set(Palette.dark, forKey: "darkTheme"); applyTheme(); popover?.close() }
     func applyTheme() {
         window.appearance = NSAppearance(named: Palette.dark ? .darkAqua : .aqua)
@@ -799,6 +802,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         for (name, value, key) in [("Bold", "bold", "b"), ("Italic", "italic", "i"), ("Strikethrough", "strike", ""), ("Heading", "heading", "h"), ("Todo", "todo", "t"), ("Bullet List", "bullet", "l"), ("Code", "code", "k"), ("Link", "link", ""), ("Quote", "quote", "")] {
             let i = menuItem(name, action: #selector(formatCommand(_:)), key: key, modifiers: value == "bold" || value == "italic" ? .command : [.command, .shift]); i.representedObject = value; format.addItem(i)
         }
+        format.addItem(.separator())
+        format.addItem(menuItem("Toggle Folding", action: #selector(toggleFolding), key: "'"))
+        format.addItem(menuItem("Fold All Headings", action: #selector(foldAllHeadings)))
+        format.addItem(menuItem("Unfold All Headings", action: #selector(unfoldAllHeadings)))
         let note = add("Note"); note.addItem(menuItem("Pin / Unpin", action: #selector(pinNote), key: "p", modifiers: [.command, .shift])); note.addItem(menuItem("Duplicate", action: #selector(duplicateNote), key: "d")); note.addItem(menuItem("Archive", action: #selector(archiveNote), key: "a", modifiers: [.command, .shift])); note.addItem(menuItem("Move to Trash", action: #selector(trashNote), key: "\u{8}", modifiers: .command)); note.addItem(menuItem("Restore to Notes", action: #selector(restoreNote)))
         let win = add("Window"); NSApp.windowsMenu = win; win.addItem(NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")); win.addItem(NSMenuItem(title: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: ""))
     }

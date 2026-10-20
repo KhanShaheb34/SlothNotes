@@ -115,6 +115,29 @@ enum EditorTests {
         editor.textView.undoManager?.redo()
         expect(editor.text.contains("- [ ] Buy 🫖"), "Native typed edits redo across projection")
 
+        // Undo shrinks the final projected paragraph while the old caret is
+        // beyond its new end. Selection must be restored after TextKit processes
+        // the character edit, including on macOS 15 with Writing Tools enabled.
+        let emptyTask = "Tasks\n- [ ] "
+        editor.setText(emptyTask)
+        let emptyTaskCaret = NSRange(location: (emptyTask as NSString).length, length: 0)
+        editor.selectSourceRange(emptyTaskCaret, scroll: false)
+        editor.textView.insertText("Long 🫖 checklist", replacementRange: editor.textView.selectedRange())
+        let completedTask = editor.text
+        let completedTaskCaret = NSRange(location: (completedTask as NSString).length, length: 0)
+        expect(editor.selectedSourceRange == completedTaskCaret, "Typing leaves the Unicode task caret at its source end")
+        editor.textView.undoManager?.undo()
+        expect(editor.text == emptyTask && editor.textView.string == "Tasks\n\u{FFFC}", "Shrinking undo restores the empty projected task")
+        expect(editor.selectedSourceRange == emptyTaskCaret && editor.textView.selectedRange() == NSRange(location: 7, length: 0),
+               "Shrinking undo restores the caret within the shorter display")
+        editor.textView.undoManager?.redo()
+        expect(editor.text == completedTask && editor.selectedSourceRange == completedTaskCaret, "Redo restores Unicode text and its mapped caret")
+        let taskSelection = (editor.text as NSString).range(of: "🫖 checklist")
+        editor.selectSourceRange(taskSelection, scroll: false)
+        editor.isDark.toggle()
+        expect(editor.selectedSourceRange == taskSelection, "Full projection restyling preserves the Unicode source selection")
+        editor.isDark.toggle()
+
         editor.setText("Tasks\n- [x] Buy 🫖")
         editor.selectSourceRange(NSRange(location: (editor.text as NSString).length, length: 0), scroll: false)
         editor.textView.insertNewline(nil)

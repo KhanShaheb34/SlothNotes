@@ -477,7 +477,6 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         defer { isStyling = false }
         let content = textView.string as NSString
         let full = requestedRange ?? NSRange(location: 0, length: content.length)
-        let selections = textView.selectedRanges
         storage.beginEditing()
         storage.setAttributes(defaultAttributes(), range: full)
 
@@ -613,8 +612,9 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             }
         }
         storage.endEditing()
-        textView.selectedRanges = selections
-        textView.typingAttributes = defaultAttributes()
+        // Projection callers restore selection and typing attributes after their
+        // outer storage edit finishes. Setting selection here can make Writing
+        // Tools query stale layout while a character replacement is still pending.
     }
 
     /// Toggles only the checkbox marker of a Markdown task, outside fenced code.

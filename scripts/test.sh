@@ -27,9 +27,22 @@ swiftc \
   -module-cache-path "$module_cache" \
   -framework AppKit \
   "$project_dir/Sources/Sloth/MarkdownEditor.swift" \
+  "$project_dir/Sources/Sloth/MarkdownLayoutManager.swift" \
+  "$project_dir/Sources/Sloth/MarkdownPresentation.swift" \
   "$project_dir/Sources/Sloth/AttachmentStore.swift" \
   "$project_dir/Tests/EditorTests.swift" \
   -o "$project_dir/.build/SlothEditorTests"
+
+for suite in MarkdownPresentation MarkdownLayout EditorPresentation; do
+  swiftc -swift-version 5 -target "$(uname -m)-apple-macosx13.0" -parse-as-library \
+    -module-cache-path "$module_cache" -framework AppKit \
+    "$project_dir/Sources/Sloth/MarkdownEditor.swift" \
+    "$project_dir/Sources/Sloth/MarkdownLayoutManager.swift" \
+    "$project_dir/Sources/Sloth/MarkdownPresentation.swift" \
+    "$project_dir/Sources/Sloth/AttachmentStore.swift" \
+    "$project_dir/Tests/${suite}Tests.swift" -o "$project_dir/.build/Sloth${suite}Tests"
+  "$project_dir/.build/Sloth${suite}Tests"
+done
 "$project_dir/.build/SlothEditorTests"
 
 swiftc -swift-version 5 -target "$(uname -m)-apple-macosx13.0" -parse-as-library \

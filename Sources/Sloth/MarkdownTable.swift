@@ -329,7 +329,13 @@ final class MarkdownTableAttachmentCell: NSTextAttachmentCell {
         let minimumTotal = minimums.reduce(0, +)
         var widths: [CGFloat]
         if minimumTotal > width {
-            widths = minimums.map { $0 * width / minimumTotal }
+            // Keep padding and a usable glyph area in every column before
+            // sharing the remaining space with oversized header words.
+            let base = min(fontSize + 20, width / CGFloat(headers.count))
+            let remaining = max(0, width - base * CGFloat(headers.count))
+            let needs = minimums.map { max(0, $0 - base) }
+            let total = needs.reduce(0, +)
+            widths = needs.map { base + (total > 0 ? remaining * $0 / total : 0) }
         } else {
             widths = minimums
             var remaining = width - minimumTotal

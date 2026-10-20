@@ -136,6 +136,24 @@ enum MarkdownTableTests {
             let lastHit = compactGrid.cellCoordinates(at: NSPoint(x: last.midX, y: last.midY), in: compactFrame)
             expect(lastHit?.row == 1 && lastHit?.column == headers.count - 1, "Compact width allocation preserves hit testing in the final column")
         }
+        let longHeaderSource = "| # | " + String(repeating: "LongHeader", count: 12) + " | Status |\n| --- | --- | --- |\n| 1 | Description | Active |\n"
+        let longHeaderTable = MarkdownPresentation.parse(longHeaderSource).tables[0]
+        for availableWidth in [CGFloat(620), CGFloat(280)] {
+            let longHeaderGrid = MarkdownTableAttachmentCell(table: longHeaderTable, source: longHeaderSource,
+                width: availableWidth, fontSize: 16, dark: false)
+            let longHeaderFrame = NSRect(origin: .zero, size: longHeaderGrid.cellSize())
+            let indexFrame = longHeaderGrid.cellFrame(row: 0, column: 0, in: longHeaderFrame)!
+            let indexText = longHeaderGrid.attributedText(row: 0, column: 0)!
+            expect(indexFrame.width >= indexText.size().width + 20,
+                   "A long unbroken header leaves room to render the short index header inside its padding")
+            let indexPoint = point(over: "#", in: indexText, frame: indexFrame.insetBy(dx: 10, dy: 8))
+            let indexHit = longHeaderGrid.cellCoordinates(at: indexPoint, in: longHeaderFrame)
+            expect(indexHit?.row == 0 && indexHit?.column == 0,
+                   "The visible short header stays inside its own hit target beside an oversized header")
+            let finalFrame = longHeaderGrid.cellFrame(row: 0, column: 2, in: longHeaderFrame)!
+            expect(abs(finalFrame.maxX - availableWidth) < 0.01,
+                   "Oversized header allocation retains the exact available table width")
+        }
         let linkSource = "| Content |\n| :--- |\n| Plain 🦥 [Café 🐻 link](https://example.com/notes) tail |\n| [local](file:///tmp/private) [script](javascript:alert) |\n"
         let linkTable = MarkdownPresentation.parse(linkSource).tables[0]
         let linkGrid = MarkdownTableAttachmentCell(table: linkTable, source: linkSource, width: 215, fontSize: 16, dark: false)

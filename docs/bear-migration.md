@@ -71,9 +71,3 @@ trash states, Unicode, dates, tags, exact attachment bytes, escaped Markdown,
 code exclusions, source fingerprint preservation, existing-note backups,
 idempotence after local edits, ID/file collisions, staging tamper detection,
 encrypted/missing payloads, source changes, symlinks, and process-check errors.
-
-The staged library on 2026-10-15 contains 118 notes (36 active, 50 archived,
-32 trashed), 28 attachment records sharing 23 files (4,075,122 bytes), and no
-encrypted/locked/missing documents. A private dry-run merged all 118 with the
-existing 8 Sloth notes, verified 126 total, and added zero documents on a repeat.
-Bear's source hashes and modification timestamps remained unchanged.

@@ -2,7 +2,7 @@
 
 Sloth can exchange notes and attachments through `iCloud Drive/Sloth` between Macs running this app. Enable **iCloud Drive** in Sloth's settings on each Mac, using the same Apple Account. macOS must already have iCloud Drive enabled. Sloth keeps the working library in its local Application Support directory, so editing and saving work without a network connection.
 
-This is ordinary iCloud Drive document synchronization. It does not use a private CloudKit database, a paid Apple developer provisioning profile, or fake iCloud entitlements. The app is locally ad hoc signed. It does not provide a separate iPhone or iPad client.
+This is iCloud Drive document synchronization. The app is locally ad hoc signed and does not require a paid Apple developer provisioning profile. There is no separate iPhone or iPad client.
 
 ## What the status means
 
@@ -23,15 +23,15 @@ A missing cloud revision never authorizes dropping a local note. Sloth republish
 
 Attachments use immutable UUID filenames in `Sloth/attachments/`. Sloth copies missing files in both directions, verifies same-name bytes, refuses symbolic links and never overwrites a different file. A complete attachment is copied before a referencing note is published. Missing referenced attachments prevent that update from being applied and cause a retry. The editor, export and sync use the same Markdown attachment parser, so code examples do not become file requests.
 
-The UI snapshots local notes before background work and applies a returned update only if that exact snapshot is still current. A newer edit or failed local save leaves the local library intact and schedules a retry. The checkpoint advances only after the local save succeeds. Original Bear storage is never used.
+The UI snapshots local notes before background work and applies a returned update only if that exact snapshot is still current. A newer edit or failed local save leaves the local library intact and schedules a retry. The checkpoint advances only after the local save succeeds.
 
 ## Validation and limits
 
 `Tests/SyncTests.swift` passes 55 assertions. It exercises isolated temporary folders representing multiple Macs: two-way changes, offline concurrent edits and deterministic conflict copies, restart ancestry, trash/restore, attachment delivery and collision preservation, missing cloud history, unavailable folders, malformed revisions, code examples, symbolic-link rejection, and controller apply/reject/disable behavior. These are transport and merge tests; they do not prove Apple server delivery or a real second-device round trip.
 
-The tests use `NSFileCoordinator`, which needs access to macOS's file coordination service. In the Codex shell sandbox that service can return Cocoa error 512; the same isolated tests pass when run with normal macOS process access. Tests never access the real iCloud Drive directory.
+The tests use `NSFileCoordinator`, which needs access to macOS's file coordination service. Run them from a normal macOS terminal; a restricted shell sandbox can block that service. Tests never access the real iCloud Drive directory.
 
-Separate live validation enabled iCloud Drive through Sloth's settings and observed **iCloud Drive folder updated**. Eight revision files and two attachments were present in the real Sloth iCloud Drive directory, and the local checkpoint had been saved. A subsequent `URLResourceValues` inspection with normal macOS process access reported **10 ubiquitous items, 10 uploaded items, and 0 upload errors**. This is macOS-reported upload status for those files at the inspection time, beyond the app's folder-update message. Receipt, reopening, and conflict handling on a real second Mac have not been tested.
+Receipt, reopening, and conflict handling on a real second Mac have not been tested.
 
 History and attachment files are retained indefinitely. The app scans revision metadata during each check, reusing verified revisions and attachment digests while inode, size, modification time, and change time remain unchanged. It does not yet compact history. Avoid manually editing or removing its history. Sloth's sync directory is visible in Finder and is not encrypted by Sloth; Apple controls the account's iCloud protection.
 

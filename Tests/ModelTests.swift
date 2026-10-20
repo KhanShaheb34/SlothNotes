@@ -45,7 +45,7 @@ enum ModelTests {
     }
 
     static func main() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("BearRea-model-tests-\(UUID().uuidString)")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Sloth-model-tests-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
 
         let note = Note(text: "# A **small** thought\n\nAn idea to keep.\n- [ ] Buy tea\n#Work/design #work/design #বাংলা/ভাবনা `#literal`\n```\n#code\n```")

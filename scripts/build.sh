@@ -25,7 +25,7 @@ swiftc \
   -module-cache-path "$module_cache" \
   -framework AppKit \
   -framework Foundation \
-  "$project_dir"/Sources/BearClone/*.swift \
+  "$project_dir"/Sources/Sloth/*.swift \
   -o "$contents_dir/MacOS/Sloth"
 
 if command -v codesign >/dev/null 2>&1; then

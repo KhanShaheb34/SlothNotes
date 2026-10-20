@@ -199,26 +199,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let environment = ProcessInfo.processInfo.environment
-        let override = environment["SLOTH_DATA_DIR"] ?? environment["BEAR_REA_DATA_DIR"]
+        let override = environment["SLOTH_DATA_DIR"]
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        var support = override.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? base.appendingPathComponent("Sloth", isDirectory: true)
-        var migrationError: String?
-        if override == nil, !FileManager.default.fileExists(atPath: support.path) {
-            let legacy = base.appendingPathComponent("Bear REA", isDirectory: true)
-            if FileManager.default.fileExists(atPath: legacy.appendingPathComponent("notes.json").path) {
-                let staging = base.appendingPathComponent("Sloth-migration-" + UUID().uuidString, isDirectory: true)
-                do {
-                    try FileManager.default.copyItem(at: legacy, to: staging)
-                    try FileManager.default.moveItem(at: staging, to: support)
-                } catch {
-                    try? FileManager.default.removeItem(at: staging)
-                    migrationError = "Your earlier notes remain in Bear REA. Sloth is using that library until migration can complete. " + error.localizedDescription; support = legacy
-                }
-            }
-            if let preferences = defaults.persistentDomain(forName: "local.bear-rea.app") {
-                for key in ["darkTheme", "fontSize"] { if let value = preferences[key] { defaults.set(value, forKey: key) } }
-            }
-        }
+        let support = override.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? base.appendingPathComponent("Sloth", isDirectory: true)
         store = NoteStore(directory: support)
         attachments = AttachmentStore(directory: support)
         Palette.dark = defaults.bool(forKey: "darkTheme")
@@ -232,7 +215,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
         configureSync(directory: support)
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); editor.focus()
-        if let message = migrationError { showError(message) }
     }
 
     func setupWindow() {

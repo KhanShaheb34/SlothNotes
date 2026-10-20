@@ -1,7 +1,7 @@
 import AppKit
 
 /// Run without showing a window:
-/// swiftc Sources/BearClone/MarkdownEditor.swift Sources/BearClone/AttachmentStore.swift Tests/EditorTests.swift -o .build/editor-tests
+/// swiftc Sources/Sloth/MarkdownEditor.swift Sources/Sloth/AttachmentStore.swift Tests/EditorTests.swift -o .build/editor-tests
 /// .build/editor-tests
 @main
 enum EditorTests {

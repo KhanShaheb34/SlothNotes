@@ -264,7 +264,7 @@ final class MarkdownTableAttachmentCell: NSTextAttachmentCell {
         guard glyphBounds.contains(localPoint) else { return nil }
         let character = layout.manager.characterIndexForGlyph(at: glyph)
         guard character < layout.storage.length else { return nil }
-        return layout.storage.attribute(.link, at: character, effectiveRange: nil) as? URL
+        return texts[coordinate.row][coordinate.column].attribute(.link, at: character, effectiveRange: nil) as? URL
     }
 
     static func textAlignment(_ alignment: MarkdownPresentation.Alignment) -> NSTextAlignment {
@@ -331,6 +331,10 @@ final class MarkdownTableAttachmentCell: NSTextAttachmentCell {
 
         init(text: NSAttributedString, width: CGFloat) {
             storage = NSTextStorage(attributedString: text)
+            // TextKit applies its own blue/underlined link drawing even when
+            // foreground attributes are present. Keep URLs in the original
+            // cell text for hit testing and draw only its explicit styling.
+            storage.removeAttribute(.link, range: NSRange(location: 0, length: storage.length))
             container = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
             container.lineFragmentPadding = 0
             storage.addLayoutManager(manager)

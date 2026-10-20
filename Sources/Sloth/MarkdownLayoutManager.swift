@@ -8,6 +8,10 @@ extension NSAttributedString.Key {
     /// Apply one non-nil identifier to every character in a fenced code block.
     /// Adjacent blocks need different identifiers; inline styling may vary within a block.
     static let markdownCodeBlockID = NSAttributedString.Key("SlothCodeBlockID")
+
+    /// Apply one identifier across consecutive quoted paragraphs. Paragraph
+    /// indentation belongs to the editor; this attribute draws their gutter bar.
+    static let markdownQuoteBlockID = NSAttributedString.Key("SlothQuoteBlockID")
 }
 
 /// TextKit decoration for a source-preserving Markdown editor. Concealment changes
@@ -18,6 +22,9 @@ final class MarkdownLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
     }
     var codeBlockCornerRadius: CGFloat = 6 {
         didSet { if codeBlockCornerRadius != oldValue { invalidateCodeDecoration() } }
+    }
+    var quoteVerticalBarColor = NSColor(srgbRed: 214.0 / 255, green: 90.0 / 255, blue: 82.0 / 255, alpha: 1) {
+        didSet { if !quoteVerticalBarColor.isEqual(oldValue) { invalidateCodeDecoration() } }
     }
 
     override init() {
@@ -72,16 +79,28 @@ final class MarkdownLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
     /// empty paragraphs inside one continuous background. Coordinates are in the
     /// text container; callers apply NSTextView's textContainerOrigin when drawing.
     func codeBlockBackgroundRects(forGlyphRange glyphRange: NSRange) -> [NSRect] {
+        blockRects(for: .markdownCodeBlockID, glyphRange: glyphRange)
+    }
+
+    /// Three-point rounded bars in the leading gutter, spanning every wrapped
+    /// line in the marked quote. Text and selection remain native TextKit content.
+    func quoteBarRects(forGlyphRange glyphRange: NSRange) -> [NSRect] {
+        blockRects(for: .markdownQuoteBlockID, glyphRange: glyphRange).map { rectangle in
+            NSRect(x: rectangle.minX + 2, y: rectangle.minY, width: 3, height: rectangle.height)
+        }
+    }
+
+    private func blockRects(for attribute: NSAttributedString.Key, glyphRange: NSRange) -> [NSRect] {
         guard glyphRange.length > 0, let storage = textStorage, storage.length > 0 else { return [] }
         let characters = characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
         guard characters.location < storage.length else { return [] }
         let relevant = NSIntersectionRange(characters, NSRange(location: 0, length: storage.length))
         guard relevant.length > 0 else { return [] }
         var blocks: [NSRange] = []
-        storage.enumerateAttribute(.markdownCodeBlockID, in: relevant) { identifier, part, _ in
+        storage.enumerateAttribute(attribute, in: relevant) { identifier, part, _ in
             guard identifier != nil else { return }
             var entireBlock = NSRange()
-            _ = storage.attribute(.markdownCodeBlockID, at: part.location, longestEffectiveRange: &entireBlock,
+            _ = storage.attribute(attribute, at: part.location, longestEffectiveRange: &entireBlock,
                                   in: NSRange(location: 0, length: storage.length))
             if blocks.last != entireBlock { blocks.append(entireBlock) }
         }
@@ -105,6 +124,11 @@ final class MarkdownLayoutManager: NSLayoutManager, NSLayoutManagerDelegate {
         for rectangle in codeBlockBackgroundRects(forGlyphRange: glyphsToShow) {
             let translated = rectangle.offsetBy(dx: origin.x, dy: origin.y)
             NSBezierPath(roundedRect: translated, xRadius: codeBlockCornerRadius, yRadius: codeBlockCornerRadius).fill()
+        }
+        quoteVerticalBarColor.setFill()
+        for rectangle in quoteBarRects(forGlyphRange: glyphsToShow) {
+            let translated = rectangle.offsetBy(dx: origin.x, dy: origin.y)
+            NSBezierPath(roundedRect: translated, xRadius: 1.5, yRadius: 1.5).fill()
         }
         NSGraphicsContext.restoreGraphicsState()
         // Native selection, marked-text and inline background colors are drawn

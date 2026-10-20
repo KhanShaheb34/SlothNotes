@@ -24,6 +24,8 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     private var presentation = MarkdownPresentation.parse("")
     private var attachmentPreview: AttachmentPreviewWindowController?
     private var tableEditor: MarkdownTableCellEditor?
+    private var tableEditingSourceIndex: Int?
+    private var expandedReadOnlyFolds = Set<Int>()
     private var composingSelection: NSRange?
     private var disabledCompositionUndo = false
     private var lastContentWidth: CGFloat = 0
@@ -31,6 +33,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     private var lastStyledSelection = NSRange(location: 0, length: 0)
 
     var text: String { markdown }
+    var hasPendingInput: Bool { tableEditor != nil || composingSelection != nil || textView.hasMarkedText() }
     var selectedSourceRange: NSRange { sourceRange(for: textView.selectedRange()) }
     var renderedAttachmentCount: Int { tokens.filter { $0.kind == .checkbox || $0.kind == .image || $0.kind == .file }.count }
     var scrollPosition: NSPoint { scrollView.contentView.bounds.origin }
@@ -110,7 +113,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         textView.usesFindBar = true
         textView.isIncrementalSearchingEnabled = true
         textView.setAccessibilityLabel("Note editor")
-        textView.setAccessibilityHelp("Edit this note. Checkboxes are clickable. Attachments open in Quick Look. Changes save automatically.")
+        textView.setAccessibilityHelp("Edit this note. Click heading arrows to fold sections. Click table cells to edit; Tab moves between cells. Command-click table links to open them. Checkboxes are clickable. Attachments open in Quick Look. Changes save automatically.")
         scrollView.documentView = textView
         if let editor = textView as? MarkdownTextView {
             editor.onFormat = { [weak self] in self?.applyFormat($0) }
@@ -159,6 +162,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         finishPendingComposition()
         isUpdating = true
         markdown = text
+        expandedReadOnlyFolds.removeAll()
         let initial = Self.expression("^ {0,3}#{1,6}[ \t]+").firstMatch(in: text, range: NSRange(location: 0, length: (text as NSString).length))?.range.length ?? 0
         rebuildProjection(sourceSelection: NSRange(location: initial, length: 0))
         textView.undoManager?.removeAllActions()
@@ -186,7 +190,10 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     }
 
     func focus() { window?.makeFirstResponder(textView) }
-    func setEditable(_ editable: Bool) { textView.isEditable = editable }
+    func setEditable(_ editable: Bool) {
+        if !editable && textView.isEditable { finishPendingComposition() }
+        textView.isEditable = editable
+    }
 
     func selectSourceRange(_ range: NSRange, scroll: Bool = true) {
         var target = clamped(range, length: (markdown as NSString).length)
@@ -194,10 +201,11 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         // selection restoration and copying an entire note keep folds intact.
         if scroll {
             while let heading = presentation.headings.first(where: {
-                $0.isFolded && NSLocationInRange(target.location, $0.bodyRange) && NSMaxRange(target) <= NSMaxRange($0.bodyRange)
-            }), let marker = heading.foldMarkerRange {
+                $0.isFolded && !expandedReadOnlyFolds.contains($0.range.location) && NSLocationInRange(target.location, $0.bodyRange) && NSMaxRange(target) <= NSMaxRange($0.bodyRange)
+            }) {
+                let previousLength = (markdown as NSString).length
                 guard toggleHeadingFold(atUTF16Index: heading.range.location) else { break }
-                target.location = max(0, target.location - marker.length)
+                target.location = max(0, target.location + (markdown as NSString).length - previousLength)
             }
         }
         let selected = displayRange(for: target)
@@ -349,6 +357,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     }
 
     private func rebuildProjection(sourceSelection: NSRange? = nil) {
+        finishTableEditing()
         guard composingSelection == nil, !textView.hasMarkedText() else { return }
         let selection = sourceSelection ?? selectedSourceRange
         let visibleOrigin = scrollView.contentView.bounds.origin
@@ -376,20 +385,37 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         guard let view = textView as? MarkdownTextView else { return }
         view.headingControls = presentation.headings.filter { heading in
             heading.bodyRange.length > 0 && !tokens.contains { $0.kind == .fold && NSLocationInRange(heading.range.location, $0.sourceRange) }
-        }.map { (displayRange(for: $0.contentRange), $0.range.location, $0.isFolded) }
+        }.map { (displayRange(for: $0.contentRange), $0.range.location, $0.isFolded && !expandedReadOnlyFolds.contains($0.range.location)) }
         view.needsDisplay = true
     }
 
     /// Fold state travels with Markdown, so reopening or syncing a note keeps it.
     @discardableResult
     func toggleHeadingFold(atUTF16Index index: Int) -> Bool {
-        guard textView.isEditable, !textView.hasMarkedText(),
-              let heading = presentation.headings.first(where: { NSLocationInRange(index, $0.range) }),
+        var target = index
+        if let editingIndex = tableEditingSourceIndex {
+            let previousLength = (markdown as NSString).length
+            finishTableEditing()
+            if editingIndex < target { target += (markdown as NSString).length - previousLength }
+        }
+        guard !textView.hasMarkedText(),
+              let heading = presentation.headings.first(where: { NSLocationInRange(target, $0.range) }),
               heading.bodyRange.length > 0 else { return false }
+        if !textView.isEditable {
+            guard heading.isFolded else { return false }
+            if expandedReadOnlyFolds.contains(heading.range.location) { expandedReadOnlyFolds.remove(heading.range.location) }
+            else { expandedReadOnlyFolds.insert(heading.range.location) }
+            rebuildProjection()
+            return true
+        }
         let range: NSRange
         let replacement: String
         if let marker = heading.foldMarkerRange {
-            range = marker
+            var removal = marker
+            if heading.isFolded, removal.location > 0, (markdown as NSString).character(at: removal.location - 1) == 32 {
+                removal.location -= 1; removal.length += 1
+            }
+            range = removal
             replacement = heading.isFolded ? "" : "<!-- {\"fold\":true} -->"
         } else {
             let source = markdown as NSString
@@ -430,10 +456,14 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
                 candidates.append((range, .checkbox, source.substring(with: range).lowercased().contains("[x]"), nil, nil))
             }
         }
+        let horizontalRule = Self.expression(#"^ {0,3}(?:-[ \t]*){3,}$|^ {0,3}(?:\*[ \t]*){3,}$|^ {0,3}(?:_[ \t]*){3,}$"#, options: [.anchorsMatchLines])
+        for match in horizontalRule.matches(in: value, range: all) where !ignored.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) {
+            candidates.append((match.range, .rule, false, nil, nil))
+        }
         for reference in AttachmentStore.references(in: value, ignoring: ignored) where reference.path.hasPrefix("attachments/") {
             candidates.append((reference.range, reference.isImage ? .image : .file, false, reference.path, reference.label))
         }
-        for heading in presentation.headings where heading.isFolded && heading.bodyRange.length > 0 {
+        for heading in presentation.headings where heading.isFolded && !expandedReadOnlyFolds.contains(heading.range.location) && heading.bodyRange.length > 0 {
             guard let marker = heading.foldMarkerRange else { continue }
             var end = NSMaxRange(heading.bodyRange)
             let original = markdown as NSString
@@ -461,6 +491,8 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             let url = path.flatMap { attachmentResolver?($0) }
             if kind == .table, let table = presentation.tables.first(where: { $0.range.location == sourceOffset + range.location }) {
                 attachment.attachmentCell = MarkdownTableAttachmentCell(table: table, source: markdown, width: contentWidth, fontSize: fontSize, dark: isDark)
+            } else if kind == .rule {
+                attachment.attachmentCell = RuleAttachmentCell(width: contentWidth, size: fontSize, dark: isDark)
             } else if kind == .fold {
                 attachment.attachmentCell = FoldAttachmentCell(size: fontSize, dark: isDark)
             } else if kind == .checkbox {
@@ -632,7 +664,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             }
         }
         func dim(_ match: NSTextCheckingResult, _ groups: [Int]) {
-            guard !literal(match.range) else { return }
+            guard !groups.contains(where: { literal(match.range(at: $0)) }) else { return }
             conceal(groups.map { match.range(at: $0) }, within: match.range)
         }
 
@@ -652,8 +684,8 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             paragraph.paragraphSpacingBefore = level == 1 ? 0 : 14
             paragraph.paragraphSpacing = 10
             style([.font: NSFont.systemFont(ofSize: fontSize * scale, weight: .semibold), .paragraphStyle: paragraph], match.range)
-            if !literal(match.range) {
-                let prefix = NSUnionRange(match.range(at: 1), match.range(at: 2))
+            let prefix = NSUnionRange(match.range(at: 1), match.range(at: 2))
+            if !literal(prefix) {
                 conceal([prefix], within: prefix)
             }
         }
@@ -662,6 +694,10 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             dim(match, [1, 3])
         }
         matches("(?<!\\*)(\\*)(?!\\*|\\s)(.+?)(?<!\\s)(\\*)(?!\\*)", options: []) { match in
+            fontTrait(.italicFontMask, match.range(at: 2))
+            dim(match, [1, 3])
+        }
+        matches(#"(?<![\p{L}\p{N}_])(_)(?!_|\s)(.+?)(?<!\s)(_)(?![\p{L}\p{N}_])"#, options: []) { match in
             fontTrait(.italicFontMask, match.range(at: 2))
             dim(match, [1, 3])
         }
@@ -724,21 +760,31 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
                 style([.foregroundColor: secondary, .strikethroughStyle: NSUnderlineStyle.single.rawValue], match.range(at: 4))
             }
         }
-        matches("^(>[ \\t]?)(.*)$") { match in
-            style([.foregroundColor: secondary, .font: NSFontManager.shared.convert(bodyFont, toHaveTrait: .italicFontMask)], match.range)
-            style([.foregroundColor: accent], match.range(at: 1))
+        matches("^(>[ \t]?)(.*)$") { match in
+            guard !literal(match.range(at: 1)) else { return }
+            let line = content.lineRange(for: match.range)
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineSpacing = fontSize * 0.42
+            paragraph.paragraphSpacing = fontSize * 0.28
+            paragraph.firstLineHeadIndent = 16
+            paragraph.headIndent = 16
+            style([.paragraphStyle: paragraph, .markdownQuoteBlockID: "quote"], line)
+            conceal([match.range(at: 1)], within: match.range(at: 1))
         }
         matches("^([ \\t]*)(-{3,}|\\*{3,}|_{3,})[ \\t]*$") { match in
             style([.foregroundColor: marker], match.range)
         }
         let codeBackground = isDark ? NSColor(markdownHex: 0x2E2F30) : NSColor(markdownHex: 0xF3F5F7)
         let codeFont = NSFont.monospacedSystemFont(ofSize: fontSize * 0.88, weight: .regular)
-        matches("(?<!`)(`)([^`\\n]+)(`)(?!`)", options: []) { match in
-            style([.font: codeFont, .foregroundColor: foreground, .backgroundColor: codeBackground,
-                   .strikethroughStyle: 0], match.range)
-            storage.removeAttribute(.link, range: match.range)
-            storage.removeAttribute(.markdownHiddenSyntax, range: match.range)
-            conceal([match.range(at: 1), match.range(at: 3)], within: match.range)
+        for range in literalRanges {
+            guard range.length > 1, !localFences.contains(where: { NSIntersectionRange(NSRange(location: full.location + $0.location, length: $0.length), range).length > 0 }) else { continue }
+            let literalText = content.substring(with: range)
+            let count = literalText.prefix(while: { $0 == "`" }).count
+            guard count > 0, range.length >= count * 2 else { continue }
+            style([.font: codeFont, .foregroundColor: foreground, .backgroundColor: codeBackground, .strikethroughStyle: 0], range)
+            storage.removeAttribute(.link, range: range)
+            storage.removeAttribute(.markdownHiddenSyntax, range: range)
+            conceal([NSRange(location: range.location, length: count), NSRange(location: NSMaxRange(range) - count, length: count)], within: range)
         }
         // Cached source fence ranges remain valid across ordinary paragraph edits.
         for (blockIndex, sourceRange) in fencedCodeRanges.enumerated() {
@@ -803,6 +849,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         storage.endEditing()
         if let manager = textView.layoutManager as? MarkdownLayoutManager {
             manager.codeBlockBackgroundColor = codeBackground
+            manager.quoteVerticalBarColor = accent
             if storage.editedMask.isEmpty { manager.invalidatePresentation(in: full) }
         }
         // Projection callers restore selection and typing attributes after their
@@ -974,8 +1021,9 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             // Short Markdown rows have implicit empty cells. Materialize the
             // needed separators when one of those cells is edited.
             let firstMissing = rowValue.cells.firstIndex { $0.range.length == 0 && $0.range.location == end } ?? column
-            let rowText = source.substring(with: NSRange(location: rowValue.range.location, length: end - rowValue.range.location)).trimmingCharacters(in: .whitespaces)
-            let trailingPipe = rowText.hasSuffix("|")
+            var last = end
+            while last > rowValue.range.location && [32, 9].contains(Int(source.character(at: last - 1))) { last -= 1 }
+            let trailingPipe = rowValue.markerRanges.contains { $0.location == last - 1 }
             replacement = (trailingPipe ? " " : " | ") + String(repeating: " | ", count: column - firstMissing) + replacement + (trailingPipe ? " |" : "")
         }
         return replace(range, with: replacement, selection: NSRange(location: index, length: 0), actionName: "Edit Table Cell", scrollToSelection: false)
@@ -983,8 +1031,15 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
 
     private func beginTableEditing(atUTF16Index index: Int, row: Int, column: Int) {
         guard textView.isEditable else { return }
+        let previousEditingIndex = tableEditingSourceIndex
+        let previousLength = (markdown as NSString).length
         finishTableEditing()
-        guard let token = tokens.first(where: { $0.kind == .table && $0.sourceRange.location == index }),
+        // A clicked table was identified before committing the previous field.
+        // Carry its source position through edits to an earlier table, including
+        // Unicode text and cells that became shorter when committed.
+        let target = index + ((previousEditingIndex.map { $0 < index } ?? false)
+            ? (markdown as NSString).length - previousLength : 0)
+        guard let token = tokens.first(where: { $0.kind == .table && $0.sourceRange.location == target }),
               let cell = token.attachment.attachmentCell as? MarkdownTableAttachmentCell,
               let manager = textView.layoutManager, let container = textView.textContainer,
               let value = cell.sourceText(row: row, column: column) else { return }
@@ -995,24 +1050,27 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         let field = MarkdownTableCellEditor(frame: bounds.offsetBy(dx: textView.textContainerOrigin.x, dy: textView.textContainerOrigin.y).insetBy(dx: 2, dy: 2),
             text: value, fontSize: fontSize, dark: isDark, alignment: MarkdownTableAttachmentCell.textAlignment(cell.table.alignments[column]))
         tableEditor = field
+        tableEditingSourceIndex = target
         field.setAccessibilityLabel("Table row \(row + 1), column \(column + 1)")
         field.onCancel = { [weak self, weak field] in
             field?.onCommit = nil
             field?.removeFromSuperview()
             self?.tableEditor = nil
+            self?.tableEditingSourceIndex = nil
             self?.focus()
         }
         field.onCommit = { [weak self, weak field] value, direction in
             guard let self, self.tableEditor === field else { return }
             field?.onCommit = nil
             self.tableEditor = nil
+            self.tableEditingSourceIndex = nil
             if field?.currentEditor() === self.window?.firstResponder { self.focus() }
             field?.removeFromSuperview()
-            _ = self.editTableCell(atUTF16Index: index, row: row, column: column, value: value)
+            _ = self.editTableCell(atUTF16Index: target, row: row, column: column, value: value)
             if direction != 0 {
                 let next = row * cell.table.columnCount + column + direction
                 if next >= 0 && next < cell.table.rows.count * cell.table.columnCount {
-                    self.beginTableEditing(atUTF16Index: index, row: next / cell.table.columnCount, column: next % cell.table.columnCount)
+                    self.beginTableEditing(atUTF16Index: target, row: next / cell.table.columnCount, column: next % cell.table.columnCount)
                 } else { self.focus() }
             } else if self.window?.firstResponder == nil { self.focus() }
         }
@@ -1023,6 +1081,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
 
     private func activateAttachment(atDisplayIndex index: Int, point: NSPoint, modifiers: NSEvent.ModifierFlags) -> Bool {
         guard let token = tokens.first(where: { $0.displayRange.location == index }) else { return false }
+        if token.kind == .rule { return false }
         if token.kind == .table, let cell = token.attachment.attachmentCell as? MarkdownTableAttachmentCell,
            let manager = textView.layoutManager, let container = textView.textContainer {
             let glyphs = manager.glyphRange(forCharacterRange: token.displayRange, actualCharacterRange: nil)
@@ -1068,7 +1127,7 @@ private struct SourceEdit {
 }
 
 private struct ProjectionToken {
-    enum Kind { case checkbox, image, file, fold, table }
+    enum Kind { case checkbox, image, file, fold, table, rule }
     var sourceRange: NSRange
     var displayRange: NSRange
     let kind: Kind
@@ -1146,6 +1205,22 @@ private final class MarkdownAttachment: NSTextAttachment {
     init(markdown: String) { self.markdown = markdown; super.init(data: nil, ofType: nil) }
     required init?(coder: NSCoder) { markdown = coder.decodeObject(forKey: "markdown") as? String ?? ""; super.init(coder: coder) }
     override func encode(with coder: NSCoder) { super.encode(with: coder); coder.encode(markdown, forKey: "markdown") }
+}
+
+private final class RuleAttachmentCell: NSTextAttachmentCell {
+    private let width: CGFloat
+    private let size: CGFloat
+    private let dark: Bool
+    init(width: CGFloat, size: CGFloat, dark: Bool) {
+        self.width = width; self.size = size; self.dark = dark
+        super.init(textCell: "Horizontal rule")
+    }
+    required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func cellSize() -> NSSize { NSSize(width: width, height: size) }
+    override func draw(withFrame frame: NSRect, in view: NSView?) {
+        (dark ? NSColor.white : NSColor.black).withAlphaComponent(0.15).setFill()
+        NSRect(x: frame.minX, y: frame.midY, width: frame.width, height: 1).fill()
+    }
 }
 
 private final class FoldAttachmentCell: NSTextAttachmentCell {

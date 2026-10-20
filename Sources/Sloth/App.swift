@@ -565,7 +565,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let controller = CloudSyncController(engine: engine, attachmentsDirectory: attachments.rootURL)
         controller.snapshot = { [weak self] in self?.store.notes ?? [] }
         controller.apply = { [weak self] notes, baseline in
-            guard let self, !self.editor.textView.hasMarkedText() else { return false }
+            guard let self, !self.editor.hasPendingInput else { return false }
             let changed = notes != self.store.notes
             guard self.store.applySyncedNotes(notes, baseline: baseline) else { return false }
             if changed { self.refresh(); self.buildSidebar() }

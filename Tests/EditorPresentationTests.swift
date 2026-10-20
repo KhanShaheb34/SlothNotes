@@ -92,7 +92,28 @@ enum EditorPresentationTests {
         editor.selectSourceRange(target)
         expect(editor.textView.string.contains("Find this 🦥"), "Navigation reveals a match inside a collapsed section")
         expect((editor.text as NSString).substring(with: editor.selectedSourceRange) == "Find this 🦥", "Revealing a fold retains the exact target selection")
-        let fixture = "# Markdown, quietly\n\nA **bold** thought, *gentle emphasis*, `inline code`, and a [useful link](https://example.com).\n\n## A folded section <!-- {\"fold\":true} -->\nThis body should not appear.\n\n## Code that stays readable\n\n```swift\nlet greeting = \"Hello, Sloth\"\n\nprint(greeting)\n```\n\nThe original Markdown is preserved."
+        editor.setText("# Note\n\n> A **quoted** thought with `code`.\n> Another line.\n\n---\n\n_Emphasis_ and ``code `inside` code``.\nEnd")
+        editor.selectSourceRange(NSRange(location: (editor.text as NSString).length, length: 0), scroll: false)
+        expect(hidden(editor, "> "), "Blockquotes hide source punctuation behind a native bar")
+        expect(!editor.textView.string.contains("---"), "Horizontal rules render as a line")
+        expect(hidden(editor, "_Emphasis_"), "Underscore emphasis conceals its delimiters")
+        expect(hidden(editor, "``code"), "Long backtick delimiters render as inline code")
+        let codeInside = (editor.textView.string as NSString).range(of: "`inside`").location
+        expect((editor.textView.textStorage?.attribute(.font, at: codeInside, effectiveRange: nil) as? NSFont)?.isFixedPitch == true,
+               "A backtick inside a longer code span remains monospaced literal content")
+        let foldRoundTrip = "# Note\n## Heading ##\nBody\n"
+        editor.setText(foldRoundTrip)
+        _ = editor.toggleHeadingFold(atUTF16Index: 7)
+        _ = editor.toggleHeadingFold(atUTF16Index: 7)
+        expect(editor.text == foldRoundTrip, "Folding and unfolding do not accumulate heading whitespace")
+        let trashFold = "# Note\n## Hidden <!-- {\"fold\":true} -->\nReadable in Trash\n"
+        editor.setText(trashFold)
+        editor.setEditable(false)
+        expect(editor.toggleHeadingFold(atUTF16Index: 7), "Read-only notes can reveal already folded sections")
+        expect(editor.textView.string.contains("Readable in Trash"), "Read-only unfolding reveals the body")
+        expect(editor.text == trashFold, "Read-only unfolding never modifies the stored note")
+        editor.setEditable(true)
+        let fixture = "# Markdown, quietly\n\nA **bold** thought, *gentle emphasis*, `inline code`, and a [useful link](https://example.com).\n\n## A folded section <!-- {\"fold\":true} -->\nThis body should not appear.\n\n## Code that stays readable\n\n```swift\nlet greeting = \"Hello, Sloth\"\n\nprint(greeting)\n```\n\n> A quiet quote with **emphasis**.\n\n---\n\nThe original Markdown is preserved."
         editor.setText(fixture)
         editor.selectSourceRange(NSRange(location: (fixture as NSString).length, length: 0), scroll: false)
         editor.restoreScrollPosition(.zero)

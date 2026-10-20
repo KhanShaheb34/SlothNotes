@@ -89,6 +89,35 @@ enum MarkdownLayoutTests {
                "Ordinary prose has no fenced-code background")
         expect(codeStorage.string == code, "Code decoration never modifies the source")
 
+        let quoteText = "Before\nA long quoted paragraph wraps through several visual lines when the container is narrow.\nAnother quoted paragraph.\nAfter"
+        let (quoteStorage, quoteManager, quoteContainer) = fixture(quoteText, width: 180)
+        let quoteSource = quoteText as NSString
+        let quoteStart = quoteSource.range(of: "A long").location
+        let quoteEnd = quoteSource.range(of: "After").location
+        let quoteRange = NSRange(location: quoteStart, length: quoteEnd - quoteStart)
+        let quoteParagraph = NSMutableParagraphStyle()
+        quoteParagraph.headIndent = 16
+        quoteParagraph.firstLineHeadIndent = 16
+        quoteStorage.addAttributes([.markdownQuoteBlockID: "quote", .paragraphStyle: quoteParagraph], range: quoteRange)
+        quoteManager.ensureLayout(for: quoteContainer)
+        let quoteGlyphs = quoteManager.glyphRange(forCharacterRange: quoteRange, actualCharacterRange: nil)
+        let bars = quoteManager.quoteBarRects(forGlyphRange: quoteGlyphs)
+        expect(bars.count == 1, "Consecutive quoted paragraphs receive one continuous gutter bar")
+        let quoteFirstLine = quoteManager.lineFragmentRect(forGlyphAt: quoteGlyphs.location, effectiveRange: nil)
+        let quoteLastLine = quoteManager.lineFragmentRect(forGlyphAt: NSMaxRange(quoteGlyphs) - 1, effectiveRange: nil)
+        expect(abs(bars[0].minX - quoteFirstLine.minX - 2) < 0.5 && abs(bars[0].width - 3) < 0.5,
+               "The quote bar stays in the leading gutter beside the indented text")
+        expect(abs(bars[0].minY - quoteFirstLine.minY) < 0.5 && abs(bars[0].maxY - quoteLastLine.maxY) < 0.5,
+               "Quote bars span all wrapped lines and consecutive paragraphs")
+        let quoteTail = quoteManager.glyphRange(forCharacterRange: quoteSource.range(of: "Another quoted"), actualCharacterRange: nil)
+        expect(quoteManager.quoteBarRects(forGlyphRange: quoteTail) == bars,
+               "Partial redraw of a quote keeps its full gutter bar geometry")
+        let outsideQuote = quoteManager.glyphRange(forCharacterRange: quoteSource.range(of: "After"), actualCharacterRange: nil)
+        expect(quoteManager.quoteBarRects(forGlyphRange: outsideQuote).isEmpty,
+               "Unquoted paragraphs have no quote bar")
+        expect(quoteStorage.string == quoteText && quoteManager.codeBlockBackgroundRects(forGlyphRange: quoteGlyphs).isEmpty,
+               "Quote decoration preserves source and does not create code backgrounds")
+
         // Restyling can set theme configuration inside an outer text-storage
         // edit. Invalidating all display here would force generation of newly
         // inserted glyphs before the transaction is balanced and crash TextKit.

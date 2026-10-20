@@ -15,6 +15,102 @@ import AppKit
         guard let data = bitmap.representation(using: .png, properties: [:]) else { throw CocoaError(.fileWriteUnknown) }
         try data.write(to: url)
     }
+    static func waitForSync(_ sync: CloudSyncController, until condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(8)
+        while !condition() && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        expect(condition(), "Temporary-folder sync completes within its retry deadline: \(sync.status.message)")
+    }
+
+    static func openTableCell(_ controller: AppController) -> MarkdownTableCellEditor {
+        let editor = controller.editor
+        editor.restoreScrollPosition(.zero)
+        editor.layoutSubtreeIfNeeded()
+        guard let storage = editor.textView.textStorage, let manager = editor.textView.layoutManager,
+              let container = editor.textView.textContainer else { fatalError("Missing native editor layout") }
+        manager.ensureLayout(for: container)
+        var tableCell: MarkdownTableAttachmentCell?
+        var tableRange = NSRange()
+        storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length)) { value, range, stop in
+            if let attachment = value as? NSTextAttachment, let cell = attachment.attachmentCell as? MarkdownTableAttachmentCell {
+                tableCell = cell; tableRange = range; stop.pointee = true
+            }
+        }
+        guard let tableCell else { fatalError("Missing rendered table") }
+        let glyphs = manager.glyphRange(forCharacterRange: tableRange, actualCharacterRange: nil)
+        let bounds = manager.boundingRect(forGlyphRange: glyphs, in: container)
+        guard let cell = tableCell.cellFrame(row: 1, column: 0, in: bounds) else { fatalError("Missing table body cell") }
+        let point = NSPoint(x: cell.midX + editor.textView.textContainerOrigin.x, y: cell.midY + editor.textView.textContainerOrigin.y)
+        let event = NSEvent.mouseEvent(with: .leftMouseDown, location: editor.textView.convert(point, to: nil),
+            modifierFlags: [], timestamp: 0, windowNumber: controller.window.windowNumber, context: nil,
+            eventNumber: 1, clickCount: 1, pressure: 1)!
+        editor.textView.mouseDown(with: event)
+        guard let field = editor.textView.subviews.compactMap({ $0 as? MarkdownTableCellEditor }).first else {
+            fatalError("Native table click did not open its cell editor")
+        }
+        return field
+    }
+
+    static func verifySyncPreservesTableDraft(_ controller: AppController, directory: URL) throws {
+        let original = "# Synced table\n\n| Work | State |\n| --- | --- |\n| Original | Ready |\n"
+        let note = controller.store.create(text: original)
+        controller.section = "all"; controller.selectedID = note.id; controller.refresh()
+        // Obtain the real application callbacks without starting default iCloud.
+        let arguments = controller.defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        var disabledCloud = arguments
+        disabledCloud["icloudEnabled"] = false
+        controller.defaults.setVolatileDomain(disabledCloud, forName: UserDefaults.argumentDomain)
+        controller.configureSync(directory: directory)
+        controller.defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        guard let configured = controller.cloud else { fatalError("Application sync was not configured") }
+
+        let shared = directory.appendingPathComponent("test-shared-cloud", isDirectory: true)
+        let remote = directory.appendingPathComponent("test-remote-device", isDirectory: true)
+        try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        let engine = CloudSync(localDirectory: directory, cloudDirectory: shared)
+        let baseline = controller.store.notes
+        let initial = try engine.sync(notes: baseline)
+        expect(configured.apply?(initial.notes, baseline) == true, "Initial folder sync applies through the application callback")
+        try engine.commit(initial)
+        let remoteEngine = CloudSync(localDirectory: remote, cloudDirectory: shared)
+        let imported = try remoteEngine.sync(notes: [])
+        try remoteEngine.commit(imported)
+        var remoteNotes = imported.notes
+        let remoteIndex = remoteNotes.firstIndex { $0.id == note.id }!
+        remoteNotes[remoteIndex].text += "\nRemote addition.\n"
+        remoteNotes[remoteIndex].modifiedAt = Date().addingTimeInterval(1)
+        let published = try remoteEngine.sync(notes: remoteNotes)
+        try remoteEngine.commit(published)
+
+        let field = openTableCell(controller)
+        field.stringValue = "Local cell draft"
+        expect(!controller.editor.textView.hasMarkedText(), "Table draft exists independently of the main editor's input method")
+        let sync = CloudSyncController(engine: engine)
+        sync.snapshot = configured.snapshot
+        sync.apply = configured.apply
+        controller.cloud = sync
+        defer { sync.stop() }
+        sync.start()
+        waitForSync(sync) {
+            switch sync.status { case .error, .ready: return true; default: return false }
+        }
+        let deferred: Bool
+        if case .error = sync.status { deferred = true } else { deferred = false }
+        expect(deferred, "Incoming same-note sync defers while a native table cell has an uncommitted draft")
+        expect(controller.store.note(id: note.id)?.text == original && controller.editor.text == original,
+               "Deferred sync leaves both the store and editor at their last committed note")
+        expect(field.superview != nil && field.stringValue == "Local cell draft", "Deferred sync leaves the native cell draft editable")
+        controller.editor.finishPendingComposition()
+        expect(controller.store.note(id: note.id)?.text.contains("| Local cell draft |") == true, "Ending the cell edit saves its draft before sync retry")
+        waitForSync(sync) { if case .ready = sync.status { return true }; return false }
+        expect(controller.store.notes.contains { $0.text.contains("Local cell draft") }, "Scheduled retry preserves the local table draft")
+        expect(controller.store.notes.contains { $0.text.contains("Remote addition.") }, "Scheduled retry preserves the concurrent remote version")
+        expect(controller.editor.text == controller.selectedID.flatMap { controller.store.note(id: $0)?.text },
+               "After retry the visible editor agrees with its stored note")
+    }
+
     static func main() throws {
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
@@ -80,6 +176,7 @@ import AppKit
         controller.store.trash(id: target.id); controller.section = "trash"; controller.refresh()
         controller.showStyles = false; controller.toggleStyles()
         expect(controller.formatBar.isHidden, "Styles toggle cannot expose editing controls in Trash")
+        try verifySyncPreservesTableDraft(controller, directory: directory)
         expect(controller.store.flush(), "Workspace test library saves")
         controller.window.delegate = nil; controller.window.orderOut(nil)
         print("Passed \(assertions) workspace assertions; native view snapshots: \(snapshotDirectory.path)")

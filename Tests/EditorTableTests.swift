@@ -69,6 +69,75 @@ enum EditorTableTests {
             expect(editor.text.contains("| Changed | Pending save |"), "Shutdown/note-switch flush includes pending table text")
             expect(editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.isEmpty, "Flushing removes the field without leaking it into another note")
         }
+        editor.setText(table)
+        editor.layoutSubtreeIfNeeded()
+        editor.textView.mouseDown(with: event)
+        editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.first?.stringValue = "Saved before fold"
+        expect(editor.toggleHeadingFold(atUTF16Index: 0), "A section with an active table cell can fold")
+        expect(editor.text.contains("Saved before fold"), "Folding commits a pending cell before source offsets shift")
+        expect(editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.isEmpty, "Folding cannot leave a floating field over hidden text")
+        editor.setText(table)
+        editor.layoutSubtreeIfNeeded()
+        editor.textView.mouseDown(with: event)
+        editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.first?.stringValue = "Saved before style"
+        editor.isDark = true
+        expect(editor.text.contains("Saved before style"), "Changing appearance preserves a table draft before rebuilding")
+        expect(editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.isEmpty, "Rebuilt tables have no stale-position field")
+        editor.isDark = false
+        editor.setText(table)
+        editor.layoutSubtreeIfNeeded()
+        editor.textView.mouseDown(with: event)
+        editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.first?.stringValue = "Saved before Trash"
+        editor.setEditable(false)
+        expect(editor.text.contains("Saved before Trash"), "Entering read-only mode flushes outgoing table edits first")
+        editor.setEditable(true)
+        editor.setText("| A | B |\n| --- | --- |\n| one\\|\n")
+        expect(editor.editTableCell(atUTF16Index: 0, row: 1, column: 1, value: "last"), "A missing cell can follow an escaped trailing pipe")
+        let escapedCells = MarkdownPresentation.parse(editor.text).tables[0].rows[1].cells
+        expect((editor.text as NSString).substring(with: escapedCells[0].contentRange) == "one\\|", "Escaped pipe remains part of the first cell")
+        expect((editor.text as NSString).substring(with: escapedCells[1].contentRange) == "last", "The new value enters the second cell")
+        // Clicking a later table flushes the active field before opening the
+        // clicked cell. That flush can move the later table's UTF-16 source index.
+        editor.setText("# Two tables\n| A | B |\n| --- | --- |\n| one | two |\n\nBetween\n\n| C | D |\n| --- | --- |\n| three | four |\n")
+        editor.layoutSubtreeIfNeeded()
+        func clickCell(inTable tableIndex: Int) {
+            manager.ensureLayout(for: container)
+            var tables: [(NSRange, MarkdownTableAttachmentCell)] = []
+            storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+                if let attachment = value as? NSTextAttachment,
+                   let cell = attachment.attachmentCell as? MarkdownTableAttachmentCell { tables.append((range, cell)) }
+            }
+            let target = tables[tableIndex]
+            let glyphs = manager.glyphRange(forCharacterRange: target.0, actualCharacterRange: nil)
+            let frame = manager.boundingRect(forGlyphRange: glyphs, in: container)
+            let bounds = target.1.cellFrame(row: 1, column: 0, in: frame)!
+            let point = NSPoint(x: bounds.midX + editor.textView.textContainerOrigin.x,
+                                y: bounds.midY + editor.textView.textContainerOrigin.y)
+            let click = NSEvent.mouseEvent(with: .leftMouseDown, location: editor.textView.convert(point, to: nil),
+                modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                eventNumber: 1, clickCount: 1, pressure: 1)!
+            editor.textView.mouseDown(with: click)
+        }
+        func typeInActiveCell(_ value: String) {
+            guard let field = editor.textView.subviews.compactMap({ $0 as? MarkdownTableCellEditor }).first,
+                  let native = field.currentEditor() as? NSTextView else { fatalError("Missing active native table field") }
+            native.insertText(value, replacementRange: NSRange(location: 0, length: (native.string as NSString).length))
+        }
+        clickCell(inTable: 0)
+        typeInActiveCell("A longer 🦥 first entry")
+        clickCell(inTable: 1)
+        expect(editor.text.contains("A longer 🦥 first entry"), "Switching tables commits the previous native field")
+        expect(editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.first?.stringValue == "three",
+               "Clicking a later table opens its requested cell after an earlier Unicode edit shifts source offsets")
+        typeInActiveCell("Later entry")
+        editor.finishPendingComposition()
+        expect(editor.text.contains("| Later entry | four |"), "The newly opened field commits to the shifted table")
+        clickCell(inTable: 0)
+        typeInActiveCell("x")
+        clickCell(inTable: 1)
+        expect(editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.first?.stringValue == "Later entry",
+               "Clicking a later table also tracks a source offset shifted backwards by a shorter edit")
+        editor.finishPendingComposition()
         editor.setEditable(false)
         expect(!editor.editTableCell(atUTF16Index: start, row: 0, column: 0, value: "No"), "Read-only notes reject cell edits")
         editor.setEditable(true)

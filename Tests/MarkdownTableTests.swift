@@ -1,5 +1,16 @@
 import AppKit
 
+private final class TableDrawingView: NSView {
+    let table: MarkdownTableAttachmentCell
+    init(table: MarkdownTableAttachmentCell) {
+        self.table = table
+        super.init(frame: NSRect(origin: .zero, size: table.cellSize()))
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override var isFlipped: Bool { true }
+    override func draw(_ dirtyRect: NSRect) { table.draw(withFrame: bounds, in: self) }
+}
+
 @main
 enum MarkdownTableTests {
     static var assertions = 0
@@ -116,6 +127,29 @@ enum MarkdownTableTests {
             let alignedText = alignedGrid.attributedText(row: 1, column: 0)!
             expect(alignedGrid.link(at: point(over: "🦥", in: alignedText, frame: alignedContent), in: alignedFrame)?.absoluteString == "https://example.com/aligned", "Aligned link hit testing follows the visible glyph position")
             expect(alignedGrid.link(at: NSPoint(x: alignedContent.minX + 1, y: alignedContent.minY + 2), in: alignedFrame) == nil, "Alignment whitespace does not activate the first visible link")
+        }
+        // TextKit can override link colors while drawing even when the source
+        // attributes are correct, so verify actual pixels rather than attributes.
+        let colorSource = "| Link |\n| --- |\n| [Sloth link](https://example.com) |\n"
+        let colorTable = MarkdownPresentation.parse(colorSource).tables[0]
+        for dark in [false, true] {
+            let colorGrid = MarkdownTableAttachmentCell(table: colorTable, source: colorSource, width: 220, fontSize: 18, dark: dark)
+            let preview = TableDrawingView(table: colorGrid)
+            let imageWindow = NSWindow(contentRect: preview.bounds, styleMask: [], backing: .buffered, defer: false)
+            imageWindow.contentView = preview
+            guard let bitmap = preview.bitmapImageRepForCachingDisplay(in: preview.bounds) else { fatalError("Cannot render table test image") }
+            preview.cacheDisplay(in: preview.bounds, to: bitmap)
+            var accentPixels = 0
+            var systemBluePixels = 0
+            for y in 0..<bitmap.pixelsHigh {
+                for x in 0..<bitmap.pixelsWide {
+                    guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), color.alphaComponent > 0.5 else { continue }
+                    if color.redComponent > color.blueComponent + 0.2 && color.redComponent > color.greenComponent + 0.2 { accentPixels += 1 }
+                    if color.blueComponent > color.redComponent + 0.2 && color.blueComponent > color.greenComponent + 0.2 { systemBluePixels += 1 }
+                }
+            }
+            expect(accentPixels > 20 && systemBluePixels == 0, "Native table drawing preserves Sloth link accent in \(dark ? "dark" : "light") appearance")
+            imageWindow.orderOut(nil)
         }
         let editing = MarkdownTableCellEditor(frame: .zero, text: "text", fontSize: 16, dark: false)
         editing.onCommit = { commits.append(($0, $1)) }

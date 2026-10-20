@@ -81,6 +81,17 @@ enum EditorPresentationTests {
         let struckCode = (editor.textView.string as NSString).range(of: "not struck").location
         expect((editor.textView.textStorage?.attribute(.strikethroughStyle, at: struckCode, effectiveRange: nil) as? Int ?? 0) == 0,
                "Inline code never inherits strike formatting")
+        editor.setText("# Title\nBody")
+        editor.textView.insertText("New ", replacementRange: editor.textView.selectedRange())
+        expect(editor.text.hasPrefix("# New Title"), "The initial heading caret inserts into its text instead of before hidden hashes")
+        editor.setText("# Note\n## Heading ##\nBody\n## Next\nEnd")
+        expect(editor.toggleHeadingFold(atUTF16Index: 7), "Headings with closing hashes can be folded")
+        expect(!editor.textView.string.contains("Body"), "A closing-hash heading persists an effective fold marker")
+        editor.setText("# Note\n## Hidden <!-- {\"fold\":true} -->\nFind this 🦥\n## Next\nEnd")
+        let target = (editor.text as NSString).range(of: "Find this 🦥")
+        editor.selectSourceRange(target)
+        expect(editor.textView.string.contains("Find this 🦥"), "Navigation reveals a match inside a collapsed section")
+        expect((editor.text as NSString).substring(with: editor.selectedSourceRange) == "Find this 🦥", "Revealing a fold retains the exact target selection")
         let fixture = "# Markdown, quietly\n\nA **bold** thought, *gentle emphasis*, `inline code`, and a [useful link](https://example.com).\n\n## A folded section <!-- {\"fold\":true} -->\nThis body should not appear.\n\n## Code that stays readable\n\n```swift\nlet greeting = \"Hello, Sloth\"\n\nprint(greeting)\n```\n\nThe original Markdown is preserved."
         editor.setText(fixture)
         editor.selectSourceRange(NSRange(location: (fixture as NSString).length, length: 0), scroll: false)

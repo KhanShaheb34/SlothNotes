@@ -92,6 +92,42 @@ enum MarkdownPresentationTests {
             }
             expect(ranges.allSatisfy { $0.location >= 0 && $0.length >= 0 && NSMaxRange($0) <= length }, "Every presentation range stays within UTF-16 source bounds")
         }
+        var incremental = "# Root\nA plain 😊 paragraph\n## Child <!-- {\"fold\":true} -->\nHidden body\n## Next\n```swift\nlet value = 42\n```\n| A | B |\n| --- | --- |\n| 1 | 2 |\nFinal line\n"
+        var incrementalDocument = MarkdownPresentation.parse(incremental)
+        for (needle, replacement) in [("plain 😊", "longer 🦥 Unicode"), ("Hidden", "Private"), ("value", "result"), ("Final line", ""), ("paragraph", "x")] {
+            let edit = (incremental as NSString).range(of: needle)
+            guard let updated = incrementalDocument.updating(previous: incremental, range: edit, replacement: replacement) else {
+                expect(false, "Ordinary paragraph and code-content edits use the incremental parser")
+                continue
+            }
+            incremental = (incremental as NSString).replacingCharacters(in: edit, with: replacement)
+            expect(updated == MarkdownPresentation.parse(incremental), "Incremental ranges exactly match a full parse after Unicode length changes")
+            incrementalDocument = updated
+        }
+        let appended = "# Heading\n"
+        let appendedDocument = MarkdownPresentation.parse(appended)
+        let append = NSRange(location: (appended as NSString).length, length: 0)
+        expect(appendedDocument.updating(previous: appended, range: append, replacement: "New body") == MarkdownPresentation.parse(appended + "New body"),
+               "Insertion into an empty final heading body expands its range")
+        let unclosed = "# Heading\n```swift\nlet value = 1"
+        expect(MarkdownPresentation.parse(unclosed).updating(previous: unclosed, range: NSRange(location: (unclosed as NSString).length, length: 0), replacement: "0") == MarkdownPresentation.parse(unclosed + "0"),
+               "Appending inside an unfinished fence extends content and block ranges")
+        let stable = "# Heading\nPlain text\n| A | B |\n| --- | --- |\n| one | two |\n"
+        let stableDocument = MarkdownPresentation.parse(stable)
+        let plainEdit = (stable as NSString).range(of: "Plain")
+        for insertion in ["\n", "\r\n", "#", "|", "`", "~", "<", ">", "-"] {
+            expect(stableDocument.updating(previous: stable, range: plainEdit, replacement: insertion) == nil,
+                   "Structural replacement requests a full parse")
+        }
+        expect(stableDocument.updating(previous: stable, range: (stable as NSString).range(of: "Heading"), replacement: "Title") == nil,
+               "Heading edits use full parsing")
+        expect(stableDocument.updating(previous: stable, range: (stable as NSString).range(of: "one"), replacement: "three") == nil,
+               "Table edits use full parsing")
+        let possibleHeading = "before\nx# Heading\n"
+        expect(MarkdownPresentation.parse(possibleHeading).updating(previous: possibleHeading, range: (possibleHeading as NSString).range(of: "x"), replacement: "") == nil,
+               "Removing plain text beside existing structure requests a full parse")
+        expect(stableDocument.updating(previous: stable, range: NSRange(location: NSNotFound, length: 0), replacement: "x") == nil,
+               "Invalid source ranges are rejected")
         print("Markdown presentation tests passed: \(assertions) assertions")
     }
 }

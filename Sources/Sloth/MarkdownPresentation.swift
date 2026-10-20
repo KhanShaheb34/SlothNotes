@@ -3,10 +3,62 @@ import Foundation
 /// Source-only Markdown structure shared by the editor's visual presentation.
 /// Every range indexes the original UTF-16 source; parsing never changes notes.
 enum MarkdownPresentation {
-    struct Document {
+    struct Document: Equatable {
         let headings: [Heading]
         let codeBlocks: [CodeBlock]
         let tables: [Table]
+
+        /// Reuses structure for ordinary edits in prose or code content. The
+        /// caller must pass the source this document was parsed from. Structural
+        /// lines and edits return nil so their boundaries are parsed afresh.
+        func updating(previous: String, range edit: NSRange, replacement: String) -> Document? {
+            let source = previous as NSString
+            guard edit.location != NSNotFound, edit.location >= 0, edit.length >= 0,
+                  edit.location <= source.length, edit.length <= source.length - edit.location else { return nil }
+            let removed = source.substring(with: edit)
+            guard replacement.rangeOfCharacter(from: .newlines) == nil,
+                  removed.rangeOfCharacter(from: .newlines) == nil else { return nil }
+            let line = source.lineRange(for: edit)
+            let lineText = source.substring(with: line).trimmingCharacters(in: .newlines)
+            let structural = CharacterSet(charactersIn: "#|`~<>-")
+            guard replacement.rangeOfCharacter(from: structural) == nil,
+                  lineText.rangeOfCharacter(from: structural) == nil,
+                  !headings.contains(where: { $0.range.location == line.location }),
+                  !tables.contains(where: { NSIntersectionRange($0.range, line).length > 0 }),
+                  !codeBlocks.contains(where: {
+                      $0.openingFenceRange.location == line.location || $0.closingFenceRange?.location == line.location
+                  }) else { return nil }
+            let delta = (replacement as NSString).length - edit.length
+            guard delta != 0 else { return self }
+            let editEnd = NSMaxRange(edit)
+            func moved(_ range: NSRange, containsInsertion: Bool = false) -> NSRange {
+                if edit.length == 0 && containsInsertion && range.location <= edit.location && edit.location <= NSMaxRange(range) {
+                    return NSRange(location: range.location, length: range.length + delta)
+                }
+                if NSMaxRange(range) <= edit.location { return range }
+                if range.location >= editEnd { return NSRange(location: range.location + delta, length: range.length) }
+                return NSRange(location: range.location, length: range.length + delta)
+            }
+            let shiftedHeadings = headings.map { heading in
+                Heading(range: moved(heading.range), prefixRange: moved(heading.prefixRange), contentRange: moved(heading.contentRange),
+                        markerRanges: heading.markerRanges.map { moved($0) }, foldMarkerRange: heading.foldMarkerRange.map { moved($0) },
+                        level: heading.level, isFolded: heading.isFolded, bodyRange: moved(heading.bodyRange, containsInsertion: true))
+            }
+            let shiftedCode = codeBlocks.map { block in
+                let inside = NSLocationInRange(edit.location, block.contentRange) ||
+                    (block.closingFenceRange == nil && edit.location == NSMaxRange(block.contentRange))
+                return CodeBlock(range: moved(block.range, containsInsertion: inside), openingFenceRange: moved(block.openingFenceRange),
+                                 closingFenceRange: block.closingFenceRange.map { moved($0) },
+                                 contentRange: moved(block.contentRange, containsInsertion: inside), languageRange: block.languageRange.map { moved($0) })
+            }
+            let shiftedTables = tables.map { table in
+                Table(range: moved(table.range), delimiterRange: moved(table.delimiterRange), rows: table.rows.map { row in
+                    Row(range: moved(row.range), cells: row.cells.map { Cell(range: moved($0.range), contentRange: moved($0.contentRange)) },
+                        markerRanges: row.markerRanges.map { moved($0) }, isHeader: row.isHeader)
+                }, alignments: table.alignments)
+            }
+            return Document(headings: shiftedHeadings, codeBlocks: shiftedCode, tables: shiftedTables)
+        }
 
         /// Nested folded headings keep their own flag, but projection only needs
         /// the outermost hidden range. Empty sections do not hide anything.
@@ -21,7 +73,7 @@ enum MarkdownPresentation {
         }
     }
 
-    struct Heading {
+    struct Heading: Equatable {
         let range: NSRange
         let prefixRange: NSRange
         let contentRange: NSRange
@@ -32,7 +84,7 @@ enum MarkdownPresentation {
         var bodyRange: NSRange
     }
 
-    struct CodeBlock {
+    struct CodeBlock: Equatable {
         let range: NSRange
         let openingFenceRange: NSRange
         let closingFenceRange: NSRange?
@@ -42,7 +94,7 @@ enum MarkdownPresentation {
 
     enum Alignment: Equatable { case unspecified, left, center, right }
 
-    struct Table {
+    struct Table: Equatable {
         let range: NSRange
         let delimiterRange: NSRange
         let rows: [Row]
@@ -50,14 +102,14 @@ enum MarkdownPresentation {
         var columnCount: Int { alignments.count }
     }
 
-    struct Row {
+    struct Row: Equatable {
         let range: NSRange
         let cells: [Cell]
         let markerRanges: [NSRange]
         let isHeader: Bool
     }
 
-    struct Cell {
+    struct Cell: Equatable {
         /// Original contents between separators, including surrounding spaces.
         let range: NSRange
         /// Cell contents excluding surrounding spaces; escapes stay in source.

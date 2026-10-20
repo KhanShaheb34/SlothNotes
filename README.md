@@ -7,7 +7,8 @@ Sloth is a native macOS app for Markdown notes, tasks, and attachments. Built wi
 ## Features
 
 - A three-pane workspace with light and dark themes, adjustable text size, focus mode, and restored reading positions.
-- Markdown editing with formatting shortcuts, clickable task checkboxes, undo/redo, and automatic list continuation.
+- Markdown editing with concealed syntax, formatted links, code blocks, editable tables, and foldable headings.
+- Formatting shortcuts, clickable task checkboxes, undo/redo, and automatic list continuation.
 - Inline images, file cards, and Quick Look previews. Add attachments using the paperclip, drag and drop, or paste.
 - Search, inline `#tags`, nested tags such as `#work/project`, and clickable `[[wiki links]]`.
 - Pinned notes, sorting, duplicate, archive, trash, and restore.
@@ -41,6 +42,16 @@ The build script creates an app for your Mac's architecture and signs it ad hoc 
 Create a note with **⌘N** and start typing; Sloth saves automatically. Add `#tags` in the note to organize it, or type `- [ ]` to start a task list. Return continues the list, and Return on an empty task ends it.
 
 Search supports plain terms, quoted phrases, `#tag`, `@todo`, `@untagged`, and `@pinned`. Multiple terms must all match. Use the sidebar to browse notes and tags, and the Note menu or a note's context menu to pin, archive, trash, or restore a note.
+
+### Editing Markdown
+
+Completed Markdown punctuation hides while you read. Move the caret inside emphasis or a link to edit its source. Notes remain plain Markdown when copied or exported.
+
+Click the arrow beside a heading to fold its section; click the arrow or the **…** indicator to expand it. Nested sections keep their own fold state. Opening a search result inside a folded section reveals the matching text.
+
+Pipe tables render as a grid. Click a cell to edit, use **Tab** or **Shift-Tab** to move between cells, **Return** to finish, or **Escape** to cancel. **⌘-click** a table link to open it. Cell edits support undo and save when you leave the cell or note.
+
+Fenced code keeps its indentation and literal punctuation inside a shaded block. Add a language after the opening fence to display its label.
 
 ### Keyboard shortcuts
 

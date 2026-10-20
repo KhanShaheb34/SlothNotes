@@ -23,6 +23,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     private var fencedCodeRanges: [NSRange] = []
     private var presentation = MarkdownPresentation.parse("")
     private var attachmentPreview: AttachmentPreviewWindowController?
+    private var tableEditor: MarkdownTableCellEditor?
     private var composingSelection: NSRange?
     private var disabledCompositionUndo = false
     private var lastContentWidth: CGFloat = 0
@@ -113,7 +114,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         scrollView.documentView = textView
         if let editor = textView as? MarkdownTextView {
             editor.onFormat = { [weak self] in self?.applyFormat($0) }
-            editor.onAttachmentClick = { [weak self] in self?.activateAttachment(atDisplayIndex: $0) ?? false }
+            editor.onAttachmentClick = { [weak self] index, point, modifiers in self?.activateAttachment(atDisplayIndex: index, point: point, modifiers: modifiers) ?? false }
             editor.onToggleFold = { [weak self] in self?.toggleHeadingFold(atUTF16Index: $0) ?? false }
             editor.onToggleCurrentFold = { [weak self] in
                 guard let self else { return }
@@ -158,7 +159,8 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         finishPendingComposition()
         isUpdating = true
         markdown = text
-        rebuildProjection(sourceSelection: NSRange(location: 0, length: 0))
+        let initial = Self.expression("^ {0,3}#{1,6}[ \t]+").firstMatch(in: text, range: NSRange(location: 0, length: (text as NSString).length))?.range.length ?? 0
+        rebuildProjection(sourceSelection: NSRange(location: initial, length: 0))
         textView.undoManager?.removeAllActions()
         textView.scroll(.zero)
         isUpdating = false
@@ -168,6 +170,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     /// before a note switch, shutdown flush, or formatting operation. Clearing
     /// undo while composition has disabled registration corrupts NSUndoManager.
     func finishPendingComposition() {
+        finishTableEditing()
         guard composingSelection != nil || textView.hasMarkedText() else { return }
         if textView.hasMarkedText() { textView.unmarkText() }
         finishComposition()
@@ -186,7 +189,18 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     func setEditable(_ editable: Bool) { textView.isEditable = editable }
 
     func selectSourceRange(_ range: NSRange, scroll: Bool = true) {
-        let selected = displayRange(for: clamped(range, length: (markdown as NSString).length))
+        var target = clamped(range, length: (markdown as NSString).length)
+        // Search/outline navigation must reveal a hidden destination. Plain
+        // selection restoration and copying an entire note keep folds intact.
+        if scroll {
+            while let heading = presentation.headings.first(where: {
+                $0.isFolded && NSLocationInRange(target.location, $0.bodyRange) && NSMaxRange(target) <= NSMaxRange($0.bodyRange)
+            }), let marker = heading.foldMarkerRange {
+                guard toggleHeadingFold(atUTF16Index: heading.range.location) else { break }
+                target.location = max(0, target.location - marker.length)
+            }
+        }
+        let selected = displayRange(for: target)
         textView.setSelectedRange(selected)
         if scroll { textView.scrollRangeToVisible(selected) }
     }
@@ -378,7 +392,10 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             range = marker
             replacement = heading.isFolded ? "" : "<!-- {\"fold\":true} -->"
         } else {
-            range = NSRange(location: NSMaxRange(heading.contentRange), length: 0)
+            let source = markdown as NSString
+            var end = NSMaxRange(heading.range)
+            while end > heading.range.location && [10, 13].contains(Int(source.character(at: end - 1))) { end -= 1 }
+            range = NSRange(location: end, length: 0)
             replacement = " <!-- {\"fold\":true} -->"
         }
         return replace(range, with: replacement, selection: NSRange(location: heading.contentRange.location, length: 0),
@@ -427,6 +444,12 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             guard range.location >= 0, NSMaxRange(range) <= source.length else { continue }
             candidates.append((range, .fold, false, nil, nil))
         }
+        for table in presentation.tables {
+            var range = NSRange(location: table.range.location - sourceOffset, length: table.range.length)
+            guard range.location >= 0, NSMaxRange(range) <= source.length else { continue }
+            while range.length > 0 && [10, 13].contains(Int(source.character(at: NSMaxRange(range) - 1))) { range.length -= 1 }
+            candidates.append((range, .table, false, nil, nil))
+        }
         candidates.sort { $0.0.location == $1.0.location ? $0.0.length > $1.0.length : $0.0.location < $1.0.location }
         let result = NSMutableAttributedString()
         var resultTokens: [ProjectionToken] = []
@@ -436,7 +459,9 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             result.append(NSAttributedString(string: source.substring(with: NSRange(location: cursor, length: range.location - cursor))))
             let attachment = MarkdownAttachment(markdown: source.substring(with: range))
             let url = path.flatMap { attachmentResolver?($0) }
-            if kind == .fold {
+            if kind == .table, let table = presentation.tables.first(where: { $0.range.location == sourceOffset + range.location }) {
+                attachment.attachmentCell = MarkdownTableAttachmentCell(table: table, source: markdown, width: contentWidth, fontSize: fontSize, dark: isDark)
+            } else if kind == .fold {
                 attachment.attachmentCell = FoldAttachmentCell(size: fontSize, dark: isDark)
             } else if kind == .checkbox {
                 attachment.attachmentCell = CheckboxAttachmentCell(checked: checked, size: fontSize, dark: isDark, accent: accent)
@@ -473,14 +498,18 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     private func updateProjection(previous: String, edit: SourceEdit, selection: NSRange) -> Bool {
         guard let storage = textView.textStorage, composingSelection == nil, !textView.hasMarkedText() else { return false }
         // A collapsed section spans paragraphs; never splice a fragment into it.
-        guard !tokens.contains(where: { $0.kind == .fold }) else { return false }
-        let nextPresentation = MarkdownPresentation.parse(markdown)
-        guard nextPresentation.foldedBodyRanges.isEmpty else { return false }
+        guard !tokens.contains(where: { $0.kind == .table }) else { return false }
+        let hadFolds = tokens.contains(where: { $0.kind == .fold })
+        let incremental = presentation.updating(previous: previous, range: edit.range, replacement: edit.replacement)
+        guard !hadFolds || incremental != nil else { return false }
+        let nextPresentation = incremental ?? MarkdownPresentation.parse(markdown)
+        guard (hadFolds || nextPresentation.foldedBodyRanges.isEmpty), nextPresentation.tables.isEmpty else { return false }
         presentation = nextPresentation
         let old = previous as NSString
         let first = old.lineRange(for: NSRange(location: edit.range.location, length: 0))
         let last = old.lineRange(for: NSRange(location: NSMaxRange(edit.range), length: 0))
         let oldRegion = NSRange(location: first.location, length: NSMaxRange(last) - first.location)
+        guard !tokens.contains(where: { $0.kind == .fold && NSIntersectionRange($0.sourceRange, oldRegion).length > 0 }) else { return false }
         let replacementLength = (edit.replacement as NSString).length
         let delta = replacementLength - edit.range.length
         let newRegion = NSRange(location: oldRegion.location, length: oldRegion.length + delta)
@@ -558,7 +587,14 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         let full = requestedRange ?? NSRange(location: 0, length: content.length)
         let selection = stylingSourceSelection.map { displayRange(for: $0) } ?? textView.selectedRange()
         lastStyledSelection = selection
-        let literalRanges = AttachmentStore.codeRanges(in: content as String)
+        let localText = content.substring(with: full)
+        let localFences = fencedCodeRanges.compactMap { range -> NSRange? in
+            let overlap = NSIntersectionRange(displayRange(for: range), full)
+            return overlap.length > 0 ? NSRange(location: overlap.location - full.location, length: overlap.length) : nil
+        }
+        let literalRanges = AttachmentStore.codeRanges(in: localText, fences: localFences).map {
+            NSRange(location: full.location + $0.location, length: $0.length)
+        }
         func literal(_ range: NSRange) -> Bool {
             literalRanges.contains { NSIntersectionRange($0, range).length > 0 }
         }
@@ -915,8 +951,89 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         onChange?(markdown)
     }
 
-    private func activateAttachment(atDisplayIndex index: Int) -> Bool {
+    private func finishTableEditing() {
+        guard let field = tableEditor else { return }
+        field.validateEditing()
+        let callback = field.onCommit
+        field.onCommit = nil
+        callback?(field.stringValue, 0)
+    }
+
+    /// Update one source cell through the same undo/save path as ordinary typing.
+    @discardableResult
+    func editTableCell(atUTF16Index index: Int, row: Int, column: Int, value: String) -> Bool {
+        guard textView.isEditable, let table = presentation.tables.first(where: { $0.range.location == index }),
+              table.rows.indices.contains(row), table.rows[row].cells.indices.contains(column) else { return false }
+        let source = markdown as NSString
+        let rowValue = table.rows[row]
+        let range = rowValue.cells[column].contentRange
+        var replacement = MarkdownTableCellEditor.escapedCellText(value)
+        var end = NSMaxRange(rowValue.range)
+        while end > rowValue.range.location && [10, 13].contains(Int(source.character(at: end - 1))) { end -= 1 }
+        if range.length == 0, range.location == end {
+            // Short Markdown rows have implicit empty cells. Materialize the
+            // needed separators when one of those cells is edited.
+            let firstMissing = rowValue.cells.firstIndex { $0.range.length == 0 && $0.range.location == end } ?? column
+            let rowText = source.substring(with: NSRange(location: rowValue.range.location, length: end - rowValue.range.location)).trimmingCharacters(in: .whitespaces)
+            let trailingPipe = rowText.hasSuffix("|")
+            replacement = (trailingPipe ? " " : " | ") + String(repeating: " | ", count: column - firstMissing) + replacement + (trailingPipe ? " |" : "")
+        }
+        return replace(range, with: replacement, selection: NSRange(location: index, length: 0), actionName: "Edit Table Cell", scrollToSelection: false)
+    }
+
+    private func beginTableEditing(atUTF16Index index: Int, row: Int, column: Int) {
+        guard textView.isEditable else { return }
+        finishTableEditing()
+        guard let token = tokens.first(where: { $0.kind == .table && $0.sourceRange.location == index }),
+              let cell = token.attachment.attachmentCell as? MarkdownTableAttachmentCell,
+              let manager = textView.layoutManager, let container = textView.textContainer,
+              let value = cell.sourceText(row: row, column: column) else { return }
+        let glyphs = manager.glyphRange(forCharacterRange: token.displayRange, actualCharacterRange: nil)
+        manager.ensureLayout(forGlyphRange: glyphs)
+        let frame = manager.boundingRect(forGlyphRange: glyphs, in: container)
+        guard let bounds = cell.cellFrame(row: row, column: column, in: frame) else { return }
+        let field = MarkdownTableCellEditor(frame: bounds.offsetBy(dx: textView.textContainerOrigin.x, dy: textView.textContainerOrigin.y).insetBy(dx: 2, dy: 2),
+            text: value, fontSize: fontSize, dark: isDark, alignment: MarkdownTableAttachmentCell.textAlignment(cell.table.alignments[column]))
+        tableEditor = field
+        field.setAccessibilityLabel("Table row \(row + 1), column \(column + 1)")
+        field.onCancel = { [weak self, weak field] in
+            field?.onCommit = nil
+            field?.removeFromSuperview()
+            self?.tableEditor = nil
+            self?.focus()
+        }
+        field.onCommit = { [weak self, weak field] value, direction in
+            guard let self, self.tableEditor === field else { return }
+            field?.onCommit = nil
+            self.tableEditor = nil
+            if field?.currentEditor() === self.window?.firstResponder { self.focus() }
+            field?.removeFromSuperview()
+            _ = self.editTableCell(atUTF16Index: index, row: row, column: column, value: value)
+            if direction != 0 {
+                let next = row * cell.table.columnCount + column + direction
+                if next >= 0 && next < cell.table.rows.count * cell.table.columnCount {
+                    self.beginTableEditing(atUTF16Index: index, row: next / cell.table.columnCount, column: next % cell.table.columnCount)
+                } else { self.focus() }
+            } else if self.window?.firstResponder == nil { self.focus() }
+        }
+        textView.addSubview(field)
+        textView.scrollToVisible(field.frame)
+        window?.makeFirstResponder(field)
+    }
+
+    private func activateAttachment(atDisplayIndex index: Int, point: NSPoint, modifiers: NSEvent.ModifierFlags) -> Bool {
         guard let token = tokens.first(where: { $0.displayRange.location == index }) else { return false }
+        if token.kind == .table, let cell = token.attachment.attachmentCell as? MarkdownTableAttachmentCell,
+           let manager = textView.layoutManager, let container = textView.textContainer {
+            let glyphs = manager.glyphRange(forCharacterRange: token.displayRange, actualCharacterRange: nil)
+            let frame = manager.boundingRect(forGlyphRange: glyphs, in: container)
+            if modifiers.contains(.command), let link = cell.link(at: point, in: frame) {
+                NSWorkspace.shared.open(link)
+            } else if let coordinate = cell.cellCoordinates(at: point, in: frame) {
+                beginTableEditing(atUTF16Index: token.sourceRange.location, row: coordinate.row, column: coordinate.column)
+            }
+            return true
+        }
         if token.kind == .fold {
             if let heading = presentation.headings.first(where: { $0.foldMarkerRange?.location == token.sourceRange.location }) {
                 return toggleHeadingFold(atUTF16Index: heading.range.location)
@@ -951,7 +1068,7 @@ private struct SourceEdit {
 }
 
 private struct ProjectionToken {
-    enum Kind { case checkbox, image, file, fold }
+    enum Kind { case checkbox, image, file, fold, table }
     var sourceRange: NSRange
     var displayRange: NSRange
     let kind: Kind
@@ -1214,7 +1331,9 @@ private final class MarkdownTextView: NSTextView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        NSGraphicsContext.saveGraphicsState()
         super.draw(dirtyRect)
+        NSGraphicsContext.restoreGraphicsState()
         NSColor.secondaryLabelColor.withAlphaComponent(0.65).setFill()
         for (frame, _, folded) in headingControlFrames() where dirtyRect.intersects(frame) {
             let path = NSBezierPath()
@@ -1241,7 +1360,7 @@ private final class MarkdownTextView: NSTextView {
     @objc private func toggleCurrentFold() { onToggleCurrentFold?() }
 
     var onFormat: ((String) -> Void)?
-    var onAttachmentClick: ((Int) -> Bool)?
+    var onAttachmentClick: ((Int, NSPoint, NSEvent.ModifierFlags) -> Bool)?
     var onReturn: (() -> Bool)?
     var onCopy: (() -> String?)?
     var onPasteFiles: (([URL]) -> Bool)?
@@ -1354,8 +1473,8 @@ private final class MarkdownTextView: NSTextView {
             let glyph = manager.glyphIndex(for: point, in: container)
             if glyph < manager.numberOfGlyphs {
                 let bounds = manager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
-                if bounds.contains(point), onAttachmentClick?(manager.characterIndexForGlyph(at: glyph)) == true {
-                    window?.makeFirstResponder(self)
+                if bounds.contains(point), onAttachmentClick?(manager.characterIndexForGlyph(at: glyph), point, event.modifierFlags) == true {
+                    if window?.firstResponder == nil { window?.makeFirstResponder(self) }
                     return
                 }
             }

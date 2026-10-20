@@ -68,9 +68,10 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     private var marker: NSColor { isDark ? NSColor(markdownHex: 0x656A6E) : NSColor(markdownHex: 0xBDC0C2) }
     private var accent: NSColor { isDark ? NSColor(markdownHex: 0xE36B64) : NSColor(markdownHex: 0xD65A52) }
     private var background: NSColor { isDark ? NSColor(markdownHex: 0x202122) : NSColor(markdownHex: 0xFFFEFC) }
-    private var contentWidth: CGFloat {
-        max(160, min(620, textView.bounds.width - textView.textContainerInset.width * 2))
+    private var availableTextWidth: CGFloat {
+        max(160, textView.bounds.width - textView.textContainerInset.width * 2)
     }
+    private var contentWidth: CGFloat { min(620, availableTextWidth) }
 
     private func configure() {
         wantsLayer = true
@@ -146,8 +147,8 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         if abs(textView.frame.width - width) > 0.5 {
             textView.setFrameSize(NSSize(width: width, height: max(textView.frame.height, scrollView.contentSize.height)))
         }
-        if abs(contentWidth - lastContentWidth) > 1 {
-            lastContentWidth = contentWidth
+        if abs(availableTextWidth - lastContentWidth) > 1 {
+            lastContentWidth = availableTextWidth
             if tokens.contains(where: { $0.kind != .checkbox }) { rebuildProjection() }
         }
     }
@@ -517,9 +518,9 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             let attachment = MarkdownAttachment(markdown: source.substring(with: range))
             let url = path.flatMap { attachmentResolver?($0) }
             if kind == .table, let table = presentation.tables.first(where: { $0.range.location == sourceOffset + range.location }) {
-                attachment.attachmentCell = MarkdownTableAttachmentCell(table: table, source: markdown, width: contentWidth, fontSize: fontSize, dark: isDark)
+                attachment.attachmentCell = MarkdownTableAttachmentCell(table: table, source: markdown, width: availableTextWidth, fontSize: fontSize, dark: isDark)
             } else if kind == .rule {
-                attachment.attachmentCell = RuleAttachmentCell(width: contentWidth, size: fontSize, dark: isDark)
+                attachment.attachmentCell = RuleAttachmentCell(width: availableTextWidth, size: fontSize, dark: isDark)
             } else if kind == .fold {
                 attachment.attachmentCell = FoldAttachmentCell(size: fontSize, dark: isDark)
             } else if kind == .checkbox {

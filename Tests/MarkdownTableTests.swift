@@ -34,6 +34,19 @@ enum MarkdownTableTests {
         return NSPoint(x: frame.minX + bounds.midX, y: frame.minY + bounds.midY)
     }
 
+    static func nativeLineCount(_ text: NSAttributedString, width: CGFloat) -> Int {
+        let storage = NSTextStorage(attributedString: text)
+        let manager = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: max(1, width), height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        storage.addLayoutManager(manager)
+        manager.addTextContainer(container)
+        manager.ensureLayout(for: container)
+        var lines = 0
+        manager.enumerateLineFragments(forGlyphRange: manager.glyphRange(for: container)) { _, _, _, _, _ in lines += 1 }
+        return lines
+    }
+
     static func main() {
         NSApplication.shared.setActivationPolicy(.prohibited)
         let text = MarkdownTableInlineText.render("**Strong** and *soft* with `code` and [site](https://example.com)", fontSize: 16)
@@ -97,6 +110,32 @@ enum MarkdownTableTests {
         expect(numberStyle?.alignment == .right, "Column alignment reaches the native renderer")
         let sourceRange = grid.sourceRange(row: 1, column: 0)!
         expect((tableSource as NSString).substring(with: sourceRange) == "**Café**", "Cell edits target exact UTF-16 source content after Unicode text")
+        for (headers, availableWidth) in [
+            (["#", "Service", "Currency", "Renews", "Category", "Monthly"], CGFloat(620)),
+            (["#", "Service", "Currency", "Renews", "Category", "Monthly", "Account", "Status"], CGFloat(760))
+        ] {
+            let values = ["1", "An example subscription with a long descriptive service name", "USD", "Yearly", "Software", "100.00", "person@example.com", "Active"]
+            let layoutSource = "| " + headers.joined(separator: " | ") + " |\n| " + Array(repeating: "---", count: headers.count).joined(separator: " | ") + " |\n| " + values.prefix(headers.count).joined(separator: " | ") + " |\n"
+            let layoutTable = MarkdownPresentation.parse(layoutSource).tables[0]
+            let layoutGrid = MarkdownTableAttachmentCell(table: layoutTable, source: layoutSource, width: availableWidth, fontSize: 16, dark: false)
+            let layoutFrame = NSRect(origin: .zero, size: layoutGrid.cellSize())
+            var totalWidth: CGFloat = 0
+            for column in headers.indices {
+                let headerFrame = layoutGrid.cellFrame(row: 0, column: column, in: layoutFrame)!
+                totalWidth += headerFrame.width
+                expect(nativeLineCount(layoutGrid.attributedText(row: 0, column: column)!, width: headerFrame.width - 20) == 1,
+                       "Available table width keeps the \(headers[column]) header word intact in \(headers.count) columns")
+            }
+            expect(abs(totalWidth - availableWidth) < 0.01, "Per-column width allocation preserves the full available table width")
+            expect(layoutGrid.cellFrame(row: 0, column: 0, in: layoutFrame)!.width < layoutGrid.cellFrame(row: 0, column: 2, in: layoutFrame)!.width,
+                   "Short numeric columns do not consume the width needed by longer headers")
+            let compactGrid = MarkdownTableAttachmentCell(table: layoutTable, source: layoutSource, width: 280, fontSize: 16, dark: false)
+            let compactFrame = NSRect(origin: .zero, size: compactGrid.cellSize())
+            let last = compactGrid.cellFrame(row: 1, column: headers.count - 1, in: compactFrame)!
+            expect(abs(last.maxX - 280) < 0.01 && last.width > 0, "Overfull header minima shrink to fit a compact table")
+            let lastHit = compactGrid.cellCoordinates(at: NSPoint(x: last.midX, y: last.midY), in: compactFrame)
+            expect(lastHit?.row == 1 && lastHit?.column == headers.count - 1, "Compact width allocation preserves hit testing in the final column")
+        }
         let linkSource = "| Content |\n| :--- |\n| Plain 🦥 [Café 🐻 link](https://example.com/notes) tail |\n| [local](file:///tmp/private) [script](javascript:alert) |\n"
         let linkTable = MarkdownPresentation.parse(linkSource).tables[0]
         let linkGrid = MarkdownTableAttachmentCell(table: linkTable, source: linkSource, width: 215, fontSize: 16, dark: false)

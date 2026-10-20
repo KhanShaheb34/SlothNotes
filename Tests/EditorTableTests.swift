@@ -48,6 +48,8 @@ enum EditorTableTests {
             }
         }
         guard let cell = attachment?.attachmentCell as? MarkdownTableAttachmentCell else { fatalError("Missing rendered table") }
+        expect(cell.cellSize().width > 620 && cell.cellSize().width <= editor.textView.bounds.width,
+               "Tables use the wide editor's available space rather than the narrower image cap")
         let glyphs = manager.glyphRange(forCharacterRange: attachmentRange, actualCharacterRange: nil)
         let bounds = manager.boundingRect(forGlyphRange: glyphs, in: container)
         guard let firstCell = cell.cellFrame(row: 1, column: 0, in: bounds) else { fatalError("Missing cell geometry") }

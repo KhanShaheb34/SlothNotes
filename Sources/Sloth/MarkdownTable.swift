@@ -187,16 +187,7 @@ final class MarkdownTableAttachmentCell: NSTextAttachmentCell {
             }
         }
         self.texts = texts
-        let count = max(1, table.columnCount)
-        let minimum = min(fontSize * 4.2, self.width / CGFloat(count))
-        let ideals = (0..<count).map { column in
-            texts.reduce(minimum) { max($0, $1[column].size().width + 20) }
-        }
-        let extra = max(0, self.width - minimum * CGFloat(count))
-        let totalWeight = ideals.reduce(0) { $0 + max(0, $1 - minimum) }
-        let widths = ideals.map { ideal in
-            minimum + (totalWeight > 0 ? extra * max(0, ideal - minimum) / totalWeight : extra / CGFloat(count))
-        }
+        let widths = Self.allocateWidths(texts: texts, width: self.width, fontSize: fontSize)
         self.columnWidths = widths
         let layouts = texts.map { row in
             row.enumerated().map { TextLayout(text: $0.element, width: max(1, widths[$0.offset] - 20)) }
@@ -322,6 +313,51 @@ final class MarkdownTableAttachmentCell: NSTextAttachmentCell {
         separators.stroke()
         outline.lineWidth = 1
         outline.stroke()
+    }
+
+    /// Reserve complete header words before giving descriptive columns extra
+    /// room. A narrow index column should not force a medium header to split.
+    private static func allocateWidths(texts: [[NSAttributedString]], width: CGFloat, fontSize: CGFloat) -> [CGFloat] {
+        guard let headers = texts.first, !headers.isEmpty else { return [] }
+        let minimums = headers.map { max(12, ceil(longestWordWidth($0))) + 20 }
+        let preferredWords = headers.indices.map { column in
+            max(minimums[column], min(fontSize * 8, texts.reduce(CGFloat(0)) { max($0, ceil(longestWordWidth($1[column])) + 20) }))
+        }
+        let preferred = headers.indices.map { column in
+            texts.reduce(preferredWords[column]) { max($0, ceil($1[column].size().width) + 20) }
+        }
+        let minimumTotal = minimums.reduce(0, +)
+        var widths: [CGFloat]
+        if minimumTotal > width {
+            widths = minimums.map { $0 * width / minimumTotal }
+        } else {
+            widths = minimums
+            var remaining = width - minimumTotal
+            func grow(toward targets: [CGFloat]) {
+                let needs = widths.indices.map { max(0, targets[$0] - widths[$0]) }
+                let total = needs.reduce(0, +)
+                guard total > 0, remaining > 0 else { return }
+                let amount = min(remaining, total)
+                for column in widths.indices { widths[column] += amount * needs[column] / total }
+                remaining -= amount
+            }
+            grow(toward: preferredWords)
+            grow(toward: preferred)
+            if remaining > 0 {
+                let total = preferred.reduce(0, +)
+                for column in widths.indices { widths[column] += remaining * preferred[column] / total }
+            }
+        }
+        // Absorb floating-point rounding so the last border matches the cell.
+        widths[widths.count - 1] += width - widths.reduce(0, +)
+        return widths
+    }
+
+    private static let wordPattern = try! NSRegularExpression(pattern: #"\S+"#)
+    private static func longestWordWidth(_ text: NSAttributedString) -> CGFloat {
+        wordPattern.matches(in: text.string, range: NSRange(location: 0, length: text.length)).reduce(0) {
+            max($0, text.attributedSubstring(from: $1.range).size().width)
+        }
     }
 
     private final class TextLayout {

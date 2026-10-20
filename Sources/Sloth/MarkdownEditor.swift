@@ -460,7 +460,11 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     private func webLink(_ destination: String) -> URL? {
         guard let url = URL(string: destination), let scheme = url.scheme?.lowercased(),
               ["http", "https", "mailto"].contains(scheme) else { return nil }
-        if scheme == "mailto" { return url.path.isEmpty ? nil : url }
+        if scheme == "mailto" {
+            // Older NSURL-backed Foundation treats mailto as opaque, so URL.path
+            // can be empty even with a recipient. Components uses RFC 3986 parsing.
+            return URLComponents(string: destination)?.path.isEmpty == false ? url : nil
+        }
         return url.host?.isEmpty == false ? url : nil
     }
 

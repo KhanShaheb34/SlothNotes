@@ -360,6 +360,10 @@ enum EditorTests {
 Links
 [Read \[this\]](<https://example.com/a?name=a%26b> "Title")
 [Email](mailto:hello@example.com)
+[Subject](mailto:hello@example.com?subject=Hello%20there&body=Details)
+[No recipient](mailto:)
+[Only subject](mailto:?subject=Hello)
+[Only fragment](mailto:#draft)
 http://example.org/page.
 mailto:team@example.com
 [Local](file:///tmp/example.txt)
@@ -376,6 +380,9 @@ https://example.net/fenced
         }
         expect(link(at: #"Read \[this\]"#)?.absoluteString == "https://example.com/a?name=a%26b", "Markdown web labels use the shared parser and preserve percent-encoded query semantics")
         expect(link(at: "Email")?.absoluteString == "mailto:hello@example.com", "Markdown mailto labels are native email links")
+        expect(link(at: "Subject")?.absoluteString == "mailto:hello@example.com?subject=Hello%20there&body=Details", "Email links preserve encoded subject and body parameters")
+        expect(link(at: "No recipient") == nil && link(at: "Only subject") == nil && link(at: "Only fragment") == nil,
+               "Email links without a recipient remain plain text")
         expect(link(at: "http://example.org/page")?.absoluteString == "http://example.org/page", "Bare web URLs exclude sentence punctuation")
         expect(link(at: "mailto:team")?.absoluteString == "mailto:team@example.com", "Bare mailto URLs are native links")
         expect(link(at: "Local") == nil && link(at: "Bear") == nil && link(at: "Unsafe") == nil, "Imported file, app and script schemes do not become actionable links")

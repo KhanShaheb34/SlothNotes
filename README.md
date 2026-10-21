@@ -49,7 +49,7 @@ Completed Markdown punctuation hides while you read. Move the caret inside empha
 
 Click the arrow beside a heading to fold its section; click the arrow or the **…** indicator to expand it. You can also use **Format → Toggle Folding** (**⌘'**) from anywhere in the section, or fold and unfold all headings from that menu. Nested sections keep their own fold state. Opening a search result inside a folded section reveals the matching text.
 
-Pipe tables render as a grid. Click a cell to edit, use **Tab** or **Shift-Tab** to move between cells, **Return** to finish, or **Escape** to cancel. **⌘-click** a table link to open it. Cell edits support undo and save when you leave the cell or note.
+Pipe tables render as a grid. Click a cell to edit, use **Tab** or **Shift-Tab** to move between cells, and **Return** to add a line within a cell. At the first or last cell, Tab navigation keeps the current cell active. **⌘-Return** finishes editing and starts a paragraph after the table; **Escape** cancels the current draft. **⌘-click** a table link to open it. Cell edits support undo and save when you leave the cell or note. Multiline cells use portable `<br>` line breaks in the Markdown source.
 
 Fenced code keeps its indentation and literal punctuation inside a shaded block. Add a language after the opening fence for syntax highlighting: Rust, Swift, JavaScript, TypeScript, Python, JSON, shell, SQL, CSS, HTML/XML, and YAML are supported. Unknown or omitted languages display as plain code. Colours adapt to the selected theme.
 

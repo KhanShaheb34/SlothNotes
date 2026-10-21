@@ -54,10 +54,14 @@ enum EditorPresentationTests {
         expect(editor.text == folded, "Fold projection preserves all original text")
         let section = (folded as NSString).range(of: "## Section").location
         expect(editor.toggleHeadingFold(atUTF16Index: section), "Fold disclosure expands its heading")
+        expect(editor.selectedSourceRange == NSRange(location: (editor.text as NSString).range(of: "Section").location, length: 0),
+               "Unfolding anchors the caret at visible heading text instead of hidden Markdown punctuation")
         expect(editor.textView.string.contains("Secret body"), "Expanding restores the complete editable body")
         expect(editor.textView.string.contains("Hidden child"), "Expanding restores nested heading text")
         expect(!editor.text.contains("\"fold\":true"), "Unfolded state persists in Markdown")
         expect(editor.toggleHeadingFold(atUTF16Index: section), "Expanded headings can be folded again")
+        expect(editor.selectedSourceRange == NSRange(location: (editor.text as NSString).range(of: "Section").location, length: 0),
+               "Folding anchors the caret at the visible heading text")
         expect(!editor.textView.string.contains("Secret body"), "Refolding removes text again")
         editor.selectSourceRange(NSRange(location: 0, length: (editor.text as NSString).length))
         let clipboard = NSPasteboard.withUniqueName()
@@ -130,10 +134,13 @@ enum EditorPresentationTests {
         editor.setEditable(true)
         let bulk = "# Root\nIntro\n## One\nBody one\n### Child\nChild body\n## Two ##\nBody two\n"
         editor.setText(bulk)
+        let bulkCaret = NSRange(location: (bulk as NSString).range(of: "Root").location + 1, length: 0)
+        editor.selectSourceRange(bulkCaret, scroll: false)
         window.undoManager?.beginUndoGrouping()
         editor.setAllHeadingsFolded(true)
         window.undoManager?.endUndoGrouping()
         expect(!editor.textView.string.contains("Body one"), "Fold All hides every section body")
+        expect(editor.selectedSourceRange == bulkCaret, "Fold All preserves a caret within visible heading text")
         expect(MarkdownPresentation.parse(editor.text).headings.allSatisfy(\.isFolded), "Fold All also remembers nested heading states")
         window.undoManager?.undo()
         expect(editor.text == bulk, "One undo restores all heading states exactly")
@@ -141,6 +148,7 @@ enum EditorPresentationTests {
         let allFolded = editor.text
         editor.setAllHeadingsFolded(false)
         expect(editor.text == bulk, "Unfold All restores exact Markdown including closing heading hashes")
+        expect(editor.selectedSourceRange == bulkCaret, "Unfold All preserves a caret within visible heading text")
         editor.selectSourceRange((bulk as NSString).range(of: "Body one"), scroll: false)
         editor.toggleCurrentHeadingFold()
         expect(!editor.textView.string.contains("Body one") && editor.textView.string.contains("Body two"), "The folding command targets the section containing the caret")
@@ -168,6 +176,8 @@ enum EditorPresentationTests {
             NSApp.postEvent(release, atStart: false)
             editor.textView.mouseDown(with: click)
             expect(!editor.textView.string.contains("Body two") && editor.textView.string.contains("Body one"), "Clicking a visible heading arrow folds precisely its section")
+            expect(editor.selectedSourceRange == NSRange(location: (editor.text as NSString).range(of: "Two").location, length: 0),
+                   "A native fold-arrow click leaves the caret at its visible heading")
             editor.setText(bulk)
             editor.selectSourceRange((bulk as NSString).range(of: "Body one"), scroll: false)
             manager.ensureLayout(for: container)

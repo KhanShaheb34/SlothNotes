@@ -14,7 +14,7 @@ enum MarkdownTableInlineText {
             .font: NSFont.systemFont(ofSize: fontSize, weight: header ? .semibold : .regular),
             .foregroundColor: foreground, .paragraphStyle: paragraph
         ]
-        guard let parsed = try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
+        guard let parsed = try? AttributedString(markdown: MarkdownTableCellEditor.decodedCellText(source), options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
             return NSAttributedString(string: source, attributes: base)
         }
         let result = NSMutableAttributedString(string: "")
@@ -56,6 +56,8 @@ final class MarkdownTableCellEditor: NSTextField, NSTextFieldDelegate {
     var onCommit: ((String, Int) -> Void)?
     var onCancel: (() -> Void)?
     private var completed = false
+    private(set) var requestedExit = false
+    private let minimumHeight: CGFloat
     // The shared AppKit field editor otherwise falls through to the note's undo
     // history. Keep its unfinished draft separate until the cell is committed.
     private let draftUndoManager = UndoManager()
@@ -63,8 +65,9 @@ final class MarkdownTableCellEditor: NSTextField, NSTextFieldDelegate {
 
     init(frame: NSRect, text: String, fontSize: CGFloat, dark: Bool,
          alignment: NSTextAlignment = .left) {
+        minimumHeight = frame.height
         super.init(frame: frame)
-        stringValue = text
+        stringValue = Self.decodedCellText(text)
         font = NSFont.systemFont(ofSize: fontSize)
         self.alignment = alignment
         isEditable = true
@@ -87,7 +90,7 @@ final class MarkdownTableCellEditor: NSTextField, NSTextFieldDelegate {
         delegate = self
         setAccessibilityLabel("Table cell")
     }
-    required init?(coder: NSCoder) { super.init(coder: coder) }
+    required init?(coder: NSCoder) { minimumHeight = 34; super.init(coder: coder) }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         switch commandSelector {
@@ -98,8 +101,13 @@ final class MarkdownTableCellEditor: NSTextField, NSTextFieldDelegate {
             stringValue = textView.string
             finish(direction: -1)
         case #selector(NSResponder.insertNewline(_:)):
-            stringValue = textView.string
-            finish(direction: 0)
+            if NSApp.currentEvent?.modifierFlags.contains(.command) == true {
+                stringValue = textView.string
+                requestedExit = true
+                finish(direction: 0)
+            } else {
+                textView.insertNewlineIgnoringFieldEditor(nil)
+            }
         case #selector(NSResponder.cancelOperation(_:)):
             guard !completed else { return true }
             completed = true
@@ -113,6 +121,89 @@ final class MarkdownTableCellEditor: NSTextField, NSTextFieldDelegate {
         finish(direction: 0)
     }
 
+    func controlTextDidChange(_ notification: Notification) { resizeToFitText() }
+
+    func resizeToFitText() {
+        guard let editor = currentEditor() as? NSTextView,
+              let manager = editor.layoutManager, let container = editor.textContainer else { return }
+        manager.ensureLayout(for: container)
+        let contentHeight = max(manager.usedRect(for: container).maxY,
+                                manager.extraLineFragmentTextContainer === container ? manager.extraLineFragmentRect.maxY : 0)
+        let viewportHeight = enclosingScrollView?.contentSize.height ?? superview?.bounds.height ?? contentHeight
+        let documentHeight = superview.map { $0.bounds.maxY - frame.minY } ?? viewportHeight
+        let maximumHeight = max(34, min(viewportHeight - 16, documentHeight))
+        let height = min(maximumHeight, max(minimumHeight, ceil(contentHeight) + 4))
+        if abs(frame.height - height) > 0.5 { setFrameSize(NSSize(width: frame.width, height: height)) }
+        editor.scrollRangeToVisible(editor.selectedRange())
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers == "\r",
+           let editor = currentEditor() as? NSTextView, window?.firstResponder === editor {
+            stringValue = editor.string
+            requestedExit = true
+            finish(direction: 0)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    /// HTML line breaks keep multiline cells on one portable Markdown row.
+    /// Escaped tags and tags inside code spans remain literal source text.
+    static func decodedCellText(_ value: String) -> String {
+        let characters = Array(value)
+        var output = ""
+        var backslashes = 0
+        var index = 0
+        while index < characters.count {
+            if characters[index] == "`", backslashes % 2 == 0 {
+                let end = codeSpanEnd(in: characters, at: index) ?? backtickRunEnd(in: characters, at: index)
+                output += String(characters[index..<end])
+                index = end
+                backslashes = 0
+                continue
+            }
+            if characters[index] == "<", backslashes % 2 == 0,
+               index + 3 < characters.count,
+               characters[index + 1].lowercased() == "b", characters[index + 2].lowercased() == "r" {
+                var end = index + 3
+                while end < characters.count, characters[end] == " " || characters[end] == "\t" { end += 1 }
+                if end < characters.count, characters[end] == "/" { end += 1 }
+                if end < characters.count, characters[end] == ">" {
+                    output.append("\n")
+                    index = end + 1
+                    backslashes = 0
+                    continue
+                }
+            }
+            output.append(characters[index])
+            backslashes = characters[index] == "\\" ? backslashes + 1 : 0
+            index += 1
+        }
+        return output
+    }
+
+    private static func backtickRunEnd(in characters: [Character], at index: Int) -> Int {
+        var end = index
+        while end < characters.count, characters[end] == "`" { end += 1 }
+        return end
+    }
+
+    private static func codeSpanEnd(in characters: [Character], at index: Int) -> Int? {
+        let openingEnd = backtickRunEnd(in: characters, at: index)
+        let delimiterCount = openingEnd - index
+        var closing = openingEnd
+        while closing < characters.count {
+            if characters[closing] != "`" { closing += 1; continue }
+            var closingEnd = closing
+            while closingEnd < characters.count, characters[closingEnd] == "`" { closingEnd += 1 }
+            if closingEnd - closing == delimiterCount { return closingEnd }
+            closing = closingEnd
+        }
+        return nil
+    }
+
     private func finish(direction: Int) {
         guard !completed else { return }
         completed = true
@@ -121,41 +212,30 @@ final class MarkdownTableCellEditor: NSTextField, NSTextFieldDelegate {
 
     /// Preserve escaped pipes and code spans; escape only pipes that split a row.
     static func escapedCellText(_ value: String) -> String {
-        let singleLine = value.replacingOccurrences(of: "\r\n", with: " ")
-            .replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
-            .replacingOccurrences(of: "\u{2028}", with: " ").replacingOccurrences(of: "\u{2029}", with: " ")
-        let characters = Array(singleLine)
+        let normalized = value.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n").replacingOccurrences(of: "\u{2028}", with: "\n")
+            .replacingOccurrences(of: "\u{2029}", with: "\n")
+        let characters = Array(normalized)
         var output = ""
         var backslashes = 0
         var index = 0
         while index < characters.count {
             let character = characters[index]
             if character == "`", backslashes % 2 == 0 {
-                var openingEnd = index
-                while openingEnd < characters.count, characters[openingEnd] == "`" { openingEnd += 1 }
-                let delimiterCount = openingEnd - index
-                var closing = openingEnd
-                var spanEnd: Int?
-                while closing < characters.count {
-                    if characters[closing] != "`" { closing += 1; continue }
-                    var closingEnd = closing
-                    while closingEnd < characters.count, characters[closingEnd] == "`" { closingEnd += 1 }
-                    if closingEnd - closing == delimiterCount { spanEnd = closingEnd; break }
-                    closing = closingEnd
-                }
-                if let spanEnd {
-                    output += String(characters[index..<spanEnd])
-                    index = spanEnd
-                    backslashes = 0
-                    continue
-                }
-                output += String(characters[index..<openingEnd])
-                index = openingEnd
+                let end = codeSpanEnd(in: characters, at: index) ?? backtickRunEnd(in: characters, at: index)
+                // Markdown code spans normalize internal line endings to spaces.
+                output += String(characters[index..<end]).replacingOccurrences(of: "\n", with: " ")
+                index = end
                 backslashes = 0
                 continue
             }
-            if character == "|", backslashes % 2 == 0 { output.append("\\") }
-            output.append(character)
+            if character == "\n" {
+                if backslashes % 2 != 0 { output.append("\\") }
+                output += "<br>"
+            } else {
+                if character == "|", backslashes % 2 == 0 { output.append("\\") }
+                output.append(character)
+            }
             backslashes = character == "\\" ? backslashes + 1 : 0
             index += 1
         }

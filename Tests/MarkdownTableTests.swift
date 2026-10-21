@@ -59,6 +59,16 @@ enum MarkdownTableTests {
         let code = text.attribute(.font, at: ns.range(of: "code").location, effectiveRange: nil) as? NSFont
         expect(code?.isFixedPitch == true, "Inline code has a monospaced font")
         expect((text.attribute(.link, at: ns.range(of: "site").location, effectiveRange: nil) as? URL)?.absoluteString == "https://example.com", "Cell link labels retain their safe URL")
+        let multiline = MarkdownTableInlineText.render("First<br>Second<BR />Third", fontSize: 16)
+        expect(multiline.string == "First\nSecond\nThird", "Portable HTML cell line breaks render as real lines")
+        expect(MarkdownTableInlineText.render("`literal<br>tag` and \\<br>", fontSize: 16).string == "literal<br>tag and <br>",
+               "Code spans and escaped break tags keep their literal text")
+        expect(MarkdownTableCellEditor.escapedCellText("First\r\nSecond | 🦥\u{2028}Third") == "First<br>Second \\| 🦥<br>Third",
+               "Multiline cell paste saves portable breaks without creating extra table rows or columns")
+        expect(MarkdownTableCellEditor.escapedCellText("`literal<br>|tag`\nNext") == "`literal<br>|tag`<br>Next",
+               "Saving line breaks preserves literal tags and pipes inside inline code")
+        let reopened = MarkdownTableCellEditor(frame: .zero, text: "First<br>Second `literal<br>tag`", fontSize: 16, dark: false)
+        expect(reopened.stringValue == "First\nSecond `literal<br>tag`", "Reopening a multiline cell decodes only non-code breaks")
         let escaped = MarkdownTableInlineText.render("a\\|b and \\*literal\\* 🦥", fontSize: 16)
         expect(escaped.string == "a|b and *literal* 🦥", "Escapes and Unicode render without exposing table syntax")
         let unsafe = MarkdownTableInlineText.render("[local](file:///tmp/private) [script](javascript:alert)", fontSize: 16)
@@ -83,7 +93,7 @@ enum MarkdownTableTests {
         expect(cancelled.control(cancelled, textView: fieldEditor, doCommandBy: #selector(NSResponder.cancelOperation(_:))), "Escape closes a cell without saving")
         cancelled.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: cancelled))
         expect(cancellations == 1 && commits.count == 1, "Escape preserves the original cell even when the field loses focus")
-        expect(MarkdownTableCellEditor.escapedCellText("one|two\\|three\nnext") == "one\\|two\\|three next", "Saving a cell escapes new pipes, keeps existing escapes, and keeps the table on one line")
+        expect(MarkdownTableCellEditor.escapedCellText("one|two\\|three\nnext") == "one\\|two\\|three<br>next", "Saving a cell escapes new pipes, keeps existing escapes, and keeps the table on one line")
         expect(MarkdownTableCellEditor.escapedCellText("`x|y` | tail") == "`x|y` \\| tail", "Saving code spans keeps their visible pipe literal while escaping real cell separators")
         let backtab = MarkdownTableCellEditor(frame: .zero, text: "old", fontSize: 16, dark: true)
         backtab.onCommit = { commits.append(($0, $1)) }
@@ -216,6 +226,59 @@ enum MarkdownTableTests {
             expect(!editing.control(editing, textView: fieldEditor, doCommandBy: selector), "Arrow keys stay with native text editing in a table cell")
         }
         expect(commits.count == beforeArrows.0 && cancellations == beforeArrows.1, "Arrow movement neither commits nor cancels a table cell")
+        let inputWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
+        let multilineField = MarkdownTableCellEditor(frame: NSRect(x: 20, y: 40, width: 200, height: 40), text: "First", fontSize: 16, dark: false)
+        inputWindow.contentView?.addSubview(multilineField)
+        var multilineCommits: [String] = []
+        multilineField.onCommit = { value, _ in multilineCommits.append(value) }
+        inputWindow.makeFirstResponder(multilineField)
+        guard let multilineEditor = multilineField.currentEditor() as? NSTextView else { fatalError("Missing multiline field editor") }
+        multilineEditor.setSelectedRange(NSRange(location: 5, length: 0))
+        multilineEditor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        expect(multilineCommits.isEmpty && multilineEditor.string == "First\n",
+               "Return inserts a line inside the active table cell without committing")
+        multilineEditor.breakUndoCoalescing()
+        multilineEditor.insertText("Second\nThird\nFourth\nFifth", replacementRange: multilineEditor.selectedRange())
+        expect(multilineField.frame.height > 80 && multilineEditor.superview!.bounds.height >= multilineEditor.layoutManager!.usedRect(for: multilineEditor.textContainer!).height,
+               "Multiline paste expands the native field so its lines are not clipped")
+        multilineEditor.undoManager?.undo()
+        expect(multilineEditor.string == "First\n", "Native undo reverses multiline typing within the current cell")
+        multilineEditor.insertText("Second", replacementRange: multilineEditor.selectedRange())
+        let commandReturn = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+            windowNumber: inputWindow.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+        expect(multilineField.performKeyEquivalent(with: commandReturn) && multilineCommits == ["First\nSecond"],
+               "Command-Return commits the complete multiline draft")
+        let longField = MarkdownTableCellEditor(frame: NSRect(x: 20, y: 40, width: 200, height: 40), text: "", fontSize: 16, dark: false)
+        inputWindow.contentView?.addSubview(longField)
+        inputWindow.makeFirstResponder(longField)
+        let longEditor = longField.currentEditor() as! NSTextView
+        longEditor.insertText(Array(repeating: "A pasted line", count: 100).joined(separator: "\n"), replacementRange: NSRange(location: 0, length: 0))
+        expect(longField.frame.maxY <= inputWindow.contentView!.bounds.maxY,
+               "A long multiline draft stays inside its available viewport")
+        let longLayout = longEditor.layoutManager!, longContainer = longEditor.textContainer!
+        expect(longEditor.superview!.bounds.maxY >= longLayout.usedRect(for: longContainer).maxY,
+               "The native field scrolls long pasted content to keep the insertion point visible")
+        longEditor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        expect(longEditor.superview!.bounds.maxY >= longLayout.extraLineFragmentRect.maxY,
+               "A trailing empty line remains visible while editing a long cell")
+        let tallReopened = MarkdownTableCellEditor(frame: NSRect(x: 20, y: 40, width: 200, height: 1900),
+            text: Array(repeating: "Saved line", count: 100).joined(separator: "<br>"), fontSize: 16, dark: false)
+        inputWindow.contentView?.addSubview(tallReopened)
+        inputWindow.makeFirstResponder(tallReopened)
+        tallReopened.resizeToFitText()
+        expect(tallReopened.frame.maxY <= inputWindow.contentView!.bounds.maxY,
+               "Reopening a tall saved row also caps its field to the available viewport")
+        let tallNative = tallReopened.currentEditor() as! NSTextView
+        tallNative.setSelectedRange(NSRange(location: (tallNative.string as NSString).length, length: 0))
+        tallReopened.resizeToFitText()
+        expect(tallNative.superview!.bounds.maxY >= tallNative.layoutManager!.usedRect(for: tallNative.textContainer!).maxY,
+               "The final line remains reachable after reopening a tall saved cell")
+        let slashBreak = MarkdownTableCellEditor.escapedCellText("A\\\nB")
+        expect(MarkdownTableInlineText.render(slashBreak, fontSize: 16).string == "A\\\nB",
+               "A backslash at the end of a pasted line cannot escape its saved line break")
+        expect(MarkdownTableCellEditor.decodedCellText("``unfinished<br>break") == "``unfinished\nbreak",
+               "Unmatched backtick runs cannot hide real cell line breaks")
+        inputWindow.orderOut(nil)
         print("Markdown table tests passed (\(assertions) assertions)")
     }
 }

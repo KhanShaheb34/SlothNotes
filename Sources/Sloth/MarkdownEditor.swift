@@ -455,7 +455,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             return true
         }
         let edit = foldEdit(for: heading, folded: !heading.isFolded)
-        return replace(edit.range, with: edit.replacement, selection: NSRange(location: heading.range.location, length: 0),
+        return replace(edit.range, with: edit.replacement, selection: NSRange(location: heading.contentRange.location, length: 0),
                        actionName: heading.isFolded ? "Unfold Section" : "Fold Section", scrollToSelection: false)
     }
 
@@ -1136,7 +1136,9 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         let source = markdown as NSString
         let rowValue = table.rows[row]
         let range = rowValue.cells[column].contentRange
-        var replacement = MarkdownTableCellEditor.escapedCellText(value)
+        let original = source.substring(with: range)
+        var replacement = value == MarkdownTableCellEditor.decodedCellText(original)
+            ? original : MarkdownTableCellEditor.escapedCellText(value)
         var end = NSMaxRange(rowValue.range)
         while end > rowValue.range.location && [10, 13].contains(Int(source.character(at: end - 1))) { end -= 1 }
         if range.length == 0, range.location == end {
@@ -1151,7 +1153,8 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         return replace(range, with: replacement, selection: NSRange(location: index, length: 0), actionName: "Edit Table Cell", scrollToSelection: false)
     }
 
-    private func beginTableEditing(atUTF16Index index: Int, row: Int, column: Int) {
+    private func beginTableEditing(atUTF16Index index: Int, row: Int, column: Int,
+                                   draft: String? = nil, selection: NSRange? = nil) {
         guard textView.isEditable else { return }
         let previousEditingIndex = tableEditingSourceIndex
         let previousLength = (markdown as NSString).length
@@ -1171,6 +1174,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         guard let bounds = cell.cellFrame(row: row, column: column, in: frame) else { return }
         let field = MarkdownTableCellEditor(frame: bounds.offsetBy(dx: textView.textContainerOrigin.x, dy: textView.textContainerOrigin.y).insetBy(dx: 2, dy: 2),
             text: value, fontSize: fontSize, dark: isDark, alignment: MarkdownTableAttachmentCell.textAlignment(cell.table.alignments[column]))
+        if let draft { field.stringValue = draft }
         tableEditor = field
         tableEditingSourceIndex = target
         field.setAccessibilityLabel("Table row \(row + 1), column \(column + 1)")
@@ -1183,6 +1187,8 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         }
         field.onCommit = { [weak self, weak field] value, direction in
             guard let self, self.tableEditor === field else { return }
+            let draftSelection = (field?.currentEditor() as? NSTextView)?.selectedRange()
+            let requestedExit = field?.requestedExit == true
             field?.onCommit = nil
             self.tableEditor = nil
             self.tableEditingSourceIndex = nil
@@ -1193,12 +1199,33 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
                 let next = row * cell.table.columnCount + column + direction
                 if next >= 0 && next < cell.table.rows.count * cell.table.columnCount {
                     self.beginTableEditing(atUTF16Index: target, row: next / cell.table.columnCount, column: next % cell.table.columnCount)
-                } else { self.focus() }
+                } else {
+                    // At a boundary, retain the original draft and native caret
+                    // after saving instead of moving into the table's Markdown.
+                    self.beginTableEditing(atUTF16Index: target, row: row, column: column,
+                                           draft: value, selection: draftSelection)
+                }
+            } else if requestedExit,
+                      let table = self.presentation.tables.first(where: { $0.range.location == target }) {
+                let source = self.markdown as NSString
+                let end = NSMaxRange(table.range)
+                let endsWithNewline = end > 0 && [10, 13].contains(Int(source.character(at: end - 1)))
+                var separator = endsWithNewline ? "\n" : "\n\n"
+                let caret = end + (separator as NSString).length
+                if end < source.length && ![10, 13].contains(Int(source.character(at: end))) { separator += "\n" }
+                _ = self.replace(NSRange(location: end, length: 0), with: separator,
+                                 selection: NSRange(location: caret, length: 0), actionName: "Edit Table Cell")
+                self.focus()
             } else if self.window?.firstResponder == nil { self.focus() }
         }
         textView.addSubview(field)
         textView.scrollToVisible(field.frame)
         window?.makeFirstResponder(field)
+        if let selection, let native = field.currentEditor() as? NSTextView {
+            native.setSelectedRange(clamped(selection, length: (native.string as NSString).length))
+        }
+        field.resizeToFitText()
+        textView.scrollToVisible(field.frame)
     }
 
     private func activateAttachment(atDisplayIndex index: Int, point: NSPoint, modifiers: NSEvent.ModifierFlags) -> Bool {

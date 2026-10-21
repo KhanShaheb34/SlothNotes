@@ -123,7 +123,7 @@ enum EditorTableTests {
         // clicked cell. That flush can move the later table's UTF-16 source index.
         editor.setText("# Two tables\n| A | B |\n| --- | --- |\n| one | two |\n\nBetween\n\n| C | D |\n| --- | --- |\n| three | four |\n")
         editor.layoutSubtreeIfNeeded()
-        func clickCell(inTable tableIndex: Int) {
+        func clickCell(inTable tableIndex: Int, row: Int = 1, column: Int = 0) {
             manager.ensureLayout(for: container)
             var tables: [(NSRange, MarkdownTableAttachmentCell)] = []
             storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
@@ -133,7 +133,7 @@ enum EditorTableTests {
             let target = tables[tableIndex]
             let glyphs = manager.glyphRange(forCharacterRange: target.0, actualCharacterRange: nil)
             let frame = manager.boundingRect(forGlyphRange: glyphs, in: container)
-            let bounds = target.1.cellFrame(row: 1, column: 0, in: frame)!
+            let bounds = target.1.cellFrame(row: row, column: column, in: frame)!
             let point = NSPoint(x: bounds.midX + editor.textView.textContainerOrigin.x,
                                 y: bounds.midY + editor.textView.textContainerOrigin.y)
             let click = NSEvent.mouseEvent(with: .leftMouseDown, location: editor.textView.convert(point, to: nil),
@@ -161,6 +161,73 @@ enum EditorTableTests {
         expect(editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.first?.stringValue == "Later entry",
                "Clicking a later table also tracks a source offset shifted backwards by a shorter edit")
         editor.finishPendingComposition()
+        editor.setText(table)
+        clickCell(inTable: 0, row: 1, column: 1)
+        typeInActiveCell("Final 🦥")
+        let lastNative = editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.first!.currentEditor() as! NSTextView
+        lastNative.setSelectedRange(NSRange(location: (lastNative.string as NSString).length, length: 0))
+        lastNative.doCommand(by: #selector(NSResponder.insertTab(_:)))
+        let boundaryField = editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.first
+        expect(boundaryField?.stringValue == "Final 🦥", "Tab in the final cell commits and keeps editing that cell")
+        guard let boundaryNative = boundaryField?.currentEditor() as? NSTextView else { fatalError("Missing final-cell field") }
+        boundaryNative.insertText(" plus", replacementRange: boundaryNative.selectedRange())
+        editor.finishPendingComposition()
+        expect(editor.text.contains("| 🦥 Sloth | Final 🦥 plus |"), "Typing after final-cell Tab keeps the caret inside that cell")
+        clickCell(inTable: 0, row: 0, column: 0)
+        let firstNative = editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.first!.currentEditor() as! NSTextView
+        firstNative.setSelectedRange(NSRange(location: 2, length: 1))
+        firstNative.doCommand(by: #selector(NSResponder.insertBacktab(_:)))
+        let firstBoundary = editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.first
+        expect(firstBoundary?.stringValue == "Item" && (firstBoundary?.currentEditor() as? NSTextView)?.selectedRange() == NSRange(location: 2, length: 1),
+               "Shift-Tab in the first cell keeps the cell and its text selection")
+        editor.finishPendingComposition()
+        for ending in ["", "\n"] {
+            let original = "| A | B |\n| --- | --- |\n| One | Two |" + ending
+            editor.setText(original)
+            clickCell(inTable: 0)
+            typeInActiveCell("First")
+            let multiline = editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.first!.currentEditor() as! NSTextView
+            multiline.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+            multiline.insertText("Second", replacementRange: multiline.selectedRange())
+            expect(multiline.string == "First\nSecond" && editor.hasPendingInput,
+                   "Return continues editing a multiline native table cell")
+            let commandReturn = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+            expect(window.performKeyEquivalent(with: commandReturn), "The native window routes Command-Return to the active table cell")
+            expect(!editor.hasPendingInput && editor.text.contains("| First<br>Second | Two |"),
+                   "Command-Return saves multiline cell source and leaves cell editing")
+            window.undoManager?.undo()
+            expect(editor.text == original, "One note undo restores both a multiline cell and its Command-Return exit paragraph")
+            window.undoManager?.redo()
+            editor.textView.insertText("After table", replacementRange: editor.textView.selectedRange())
+            expect(MarkdownPresentation.parse(editor.text).tables.count == 1 && editor.text.hasSuffix("\n\nAfter table"),
+                   "Typing after Command-Return starts a safe paragraph after a table at EOF")
+            let saved = editor.text
+            editor.setText(saved)
+            clickCell(inTable: 0)
+            let reopened = editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.first!
+            expect(reopened.stringValue == "First\nSecond", "Saved multiline source reopens as editable lines")
+            typeInActiveCell("Pasted first\nPasted second | 🦥")
+            window.makeFirstResponder(editor.textView)
+            expect(editor.text.contains("Pasted first<br>Pasted second \\| 🦥") && MarkdownPresentation.parse(editor.text).tables[0].rows.count == 2,
+                   "Leaving a multiline paste saves its line breaks and preserves the table structure")
+            window.undoManager?.undo()
+            expect(editor.text == saved, "Focus-loss commit of a multiline cell remains one note undo action")
+        }
+        let variedBreaks = "| A | B |\n| --- | --- |\n| First<BR />Second `literal<br>tag` | Two |\n\nAfter."
+        editor.setText(variedBreaks)
+        clickCell(inTable: 0)
+        let unchangedMultiline = editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.first!
+        expect(unchangedMultiline.stringValue == "First\nSecond `literal<br>tag`", "Editing imported break tags keeps literal inline code intact")
+        window.makeFirstResponder(editor.textView)
+        expect(editor.text == variedBreaks, "Opening and leaving a multiline cell preserves its exact original Markdown")
+        clickCell(inTable: 0)
+        let finishBeforeParagraph = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+        _ = window.performKeyEquivalent(with: finishBeforeParagraph)
+        editor.textView.insertText("Inserted paragraph", replacementRange: editor.textView.selectedRange())
+        expect(editor.text.hasSuffix("\n\nInserted paragraph\nAfter.") && MarkdownPresentation.parse(editor.text).tables.count == 1,
+               "Command-Return creates a safe paragraph before existing following text")
         editor.setEditable(false)
         expect(!editor.editTableCell(atUTF16Index: start, row: 0, column: 0, value: "No"), "Read-only notes reject cell edits")
         editor.setEditable(true)

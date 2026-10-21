@@ -19,6 +19,22 @@ enum MarkdownTableTests {
         guard condition() else { fputs("FAIL: \(message)\n", stderr); exit(1) }
     }
 
+    /// Finish one native event rather than assuming text coalescing also closes
+    /// AppKit's event-based undo group. This also lets field-editor focus settle.
+    static func finishNativeEvent() {
+        let runLoop = CFRunLoopGetCurrent()!
+        var reachedBoundary = false
+        let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue,
+                                                         false, CFIndex.max) { _, _ in
+            reachedBoundary = true
+            CFRunLoopStop(runLoop)
+        }!
+        CFRunLoopAddObserver(runLoop, observer, .defaultMode)
+        CFRunLoopRunInMode(.defaultMode, 1, false)
+        CFRunLoopRemoveObserver(runLoop, observer, .defaultMode)
+        expect(reachedBoundary, "The native test reaches the end of its input event")
+    }
+
     /// Use native glyph geometry to click a known literal label in test content.
     static func point(over substring: String, in text: NSAttributedString, frame: NSRect) -> NSPoint {
         let storage = NSTextStorage(attributedString: text)
@@ -232,17 +248,22 @@ enum MarkdownTableTests {
         var multilineCommits: [String] = []
         multilineField.onCommit = { value, _ in multilineCommits.append(value) }
         inputWindow.makeFirstResponder(multilineField)
+        finishNativeEvent()
         guard let multilineEditor = multilineField.currentEditor() as? NSTextView else { fatalError("Missing multiline field editor") }
         multilineEditor.setSelectedRange(NSRange(location: 5, length: 0))
         multilineEditor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
         expect(multilineCommits.isEmpty && multilineEditor.string == "First\n",
                "Return inserts a line inside the active table cell without committing")
         multilineEditor.breakUndoCoalescing()
+        finishNativeEvent()
         multilineEditor.insertText("Second\nThird\nFourth\nFifth", replacementRange: multilineEditor.selectedRange())
         expect(multilineField.frame.height > 80 && multilineEditor.superview!.bounds.height >= multilineEditor.layoutManager!.usedRect(for: multilineEditor.textContainer!).height,
                "Multiline paste expands the native field so its lines are not clipped")
+        finishNativeEvent()
+        let couldUndo = multilineEditor.undoManager?.canUndo == true
         multilineEditor.undoManager?.undo()
-        expect(multilineEditor.string == "First\n", "Native undo reverses multiline typing within the current cell")
+        expect(multilineEditor.string == "First\n",
+               "Native undo reverses multiline typing within the current cell (canUndo: \(couldUndo), actual: \(multilineEditor.string.debugDescription))")
         multilineEditor.insertText("Second", replacementRange: multilineEditor.selectedRange())
         let commandReturn = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
             windowNumber: inputWindow.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!

@@ -28,8 +28,12 @@ struct Note: Codable, Identifiable, Equatable {
     private static let leadingMarkupRegex = try! NSRegularExpression(pattern: #"^(?:#{1,6}(?:\s+|$)|>\s*|[-*+]\s+(?:\[[ xX]\]\s*)?|\d+\.\s+)"#)
     private static let linkRegex = try! NSRegularExpression(pattern: #"!?\[([^\]]+)\]\([^)]*\)"#)
     private static let emphasisRegex = try! NSRegularExpression(pattern: #"[*_`~]"#)
+    private static let foldHeadingPrefix = try! NSRegularExpression(pattern: #"^ {0,3}(#{1,6})(?:[ \t]+|$)"#)
+    private static let foldMetadataSuffix = try! NSRegularExpression(pattern: #"(<!--[ \t]*(\{[^\r\n]*\})[ \t]*-->)[ \t]*$"#)
 
-    var title: String {
+    var title: String { Self.title(in: Self.summarySource(text)) }
+
+    fileprivate static func title(in text: String) -> String {
         var title = "Untitled note"
         text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .byLines) { line, _, _, stop in
             guard let line, !line.trimmingCharacters(in: .whitespaces).isEmpty else { return }
@@ -40,7 +44,9 @@ struct Note: Codable, Identifiable, Equatable {
         return title
     }
 
-    var preview: String {
+    var preview: String { Self.preview(in: Self.summarySource(text)) }
+
+    fileprivate static func preview(in text: String) -> String {
         var foundTitle = false
         var body = ""
         text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .byLines) { line, _, _, stop in
@@ -73,11 +79,62 @@ struct Note: Codable, Identifiable, Equatable {
         return Self.todoRegex.firstMatch(in: source, range: NSRange(source.startIndex..<source.endIndex, in: source)) != nil
     }
 
-    var wordCount: Int {
-        Self.wordRegex.numberOfMatches(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text))
+    var wordCount: Int { Self.wordCount(in: Self.summarySource(text)) }
+
+    fileprivate static func wordCount(in text: String) -> Int {
+        wordRegex.numberOfMatches(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text))
     }
 
-    var characterCount: Int { text.count }
+    var characterCount: Int { Self.summarySource(text).count }
+
+    /// Folding is persisted in Markdown but is not part of the person's text
+    /// for summaries or statistics. Match the presentation parser's heading and
+    /// boolean suffix rules, leaving ordinary comments and code examples intact.
+    fileprivate static func summarySource(_ text: String) -> String {
+        guard text.contains("<!--") else { return text }
+        let source = text as NSString
+        var cursor = 0
+        var copiedThrough = 0
+        var pieces: [String] = []
+        var openingFence: (character: Character, count: Int)?
+        while cursor < source.length {
+            let lineRange = source.lineRange(for: NSRange(location: cursor, length: 0))
+            cursor = NSMaxRange(lineRange)
+            let line = source.substring(with: lineRange).trimmingCharacters(in: .newlines)
+            let fenceLine = line.trimmingCharacters(in: .whitespaces)
+            if let first = fenceLine.first, first == "`" || first == "~" {
+                let count = fenceLine.prefix(while: { $0 == first }).count
+                if count >= 3 {
+                    if let opening = openingFence {
+                        if first == opening.character, count >= opening.count,
+                           fenceLine.dropFirst(count).trimmingCharacters(in: .whitespaces).isEmpty {
+                            openingFence = nil
+                        }
+                    } else { openingFence = (first, count) }
+                    continue
+                }
+            }
+            guard openingFence == nil else { continue }
+            let full = NSRange(location: 0, length: (line as NSString).length)
+            guard let heading = foldHeadingPrefix.firstMatch(in: line, range: full),
+                  let fold = foldMetadataSuffix.firstMatch(in: line, range: full),
+                  fold.range.location >= NSMaxRange(heading.range),
+                  let data = (line as NSString).substring(with: fold.range(at: 2)).data(using: .utf8),
+                  let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let flag = object["fold"] as? NSNumber, String(cString: flag.objCType) == "c" else { continue }
+            var removal = NSRange(location: lineRange.location + fold.range(at: 1).location, length: fold.range(at: 1).length)
+            // The folding command adds one separator space before its marker.
+            if removal.location > lineRange.location, source.character(at: removal.location - 1) == 32 {
+                removal.location -= 1
+                removal.length += 1
+            }
+            pieces.append(source.substring(with: NSRange(location: copiedThrough, length: removal.location - copiedThrough)))
+            copiedThrough = NSMaxRange(removal)
+        }
+        guard !pieces.isEmpty else { return text }
+        pieces.append(source.substring(from: copiedThrough))
+        return pieces.joined()
+    }
 
     fileprivate static func prose(_ text: String) -> String {
         // ASCII delimiter detection avoids Unicode substring searching for the
@@ -139,14 +196,15 @@ struct Note: Codable, Identifiable, Equatable {
 final class NoteMetadata {
     fileprivate let note: Note
     init(_ note: Note) { self.note = note }
-    lazy var title = note.title
-    lazy var preview = note.preview
+    private lazy var summarySource = Note.summarySource(note.text)
+    lazy var title = Note.title(in: summarySource)
+    lazy var preview = Note.preview(in: summarySource)
     private lazy var prose = Note.prose(note.text)
     lazy var tags = Note.tags(in: prose)
     lazy var normalizedTags = tags.map { $0.lowercased() }
     lazy var hasTodo = Note.todoRegex.firstMatch(in: prose, range: NSRange(prose.startIndex..<prose.endIndex, in: prose)) != nil
-    lazy var wordCount = note.wordCount
-    lazy var characterCount = note.characterCount
+    lazy var wordCount = Note.wordCount(in: summarySource)
+    lazy var characterCount = summarySource.count
 }
 
 /// Owns the file state on a serial queue. The previous successfully decoded or

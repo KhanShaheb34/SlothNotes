@@ -118,6 +118,54 @@ enum ModelTests {
         expect(Note(text: "hello café world's").wordCount == 3, "Unicode words and apostrophes")
         expect(Note(text: "🐻é").characterCount == 2, "Grapheme character count")
 
+        for newline in ["\n", "\r\n"] {
+            let unfoldedSource = ["# Draft 🦥", "A first paragraph.", "  ## Section", "Body বাংলা.", "### Child", "Tail."].joined(separator: newline) + newline
+            let unfolded = Note(text: unfoldedSource)
+            for flag in ["true", "false"] {
+                let foldedSource = unfoldedSource
+                    .replacingOccurrences(of: "# Draft 🦥", with: "# Draft 🦥 <!-- {\"fold\":\(flag)} -->")
+                    .replacingOccurrences(of: "## Section", with: "## Section <!-- {\"fold\":\(flag)} -->")
+                    .replacingOccurrences(of: "### Child", with: "### Child <!-- {\"fold\":\(flag)} -->")
+                let folded = Note(text: foldedSource)
+                let metadata = NoteMetadata(folded)
+                expect(folded.wordCount == unfolded.wordCount && folded.characterCount == unfolded.characterCount,
+                       "Fold state metadata never changes displayed word or character counts")
+                expect(metadata.wordCount == unfolded.wordCount && metadata.characterCount == unfolded.characterCount,
+                       "Cached note statistics use the same fold-free summary source")
+                expect(folded.title == unfolded.title && folded.preview == unfolded.preview,
+                       "Fold metadata never leaks into note titles or list previews")
+                expect(metadata.title == unfolded.title && metadata.preview == unfolded.preview,
+                       "Cached titles and previews exclude saved fold metadata")
+                expect(folded.text == foldedSource, "Summary analysis preserves every byte of the stored Markdown")
+            }
+        }
+        let literalFoldExamples = [
+            "# Title <!-- review me -->",
+            "# Title <!-- {\"fold\":1} -->",
+            "# Title <!-- {\"fold\":\"true\"} -->",
+            "# Title <!-- {\"other\":true} -->",
+            "# Title <!-- {\"fold\":true -->",
+            "# Title <!-- {\"fold\":true} --> followed by prose",
+            "# Note\nParagraph <!-- {\"fold\":true} -->",
+            "# Note\n    ## Example <!-- {\"fold\":true} -->",
+            "# Note\n```markdown\n## Example <!-- {\"fold\":true} -->\n```",
+            "# Note\n~~~markdown\n## Example <!-- {\"fold\":true} -->\n~~~"
+        ]
+        for source in literalFoldExamples {
+            let literal = Note(text: source)
+            expect(literal.characterCount == source.count,
+                   "User comments, malformed metadata and fenced examples remain part of character counts")
+            expect((literal.title + " " + literal.preview).contains("<!--"),
+                   "Summary rendering preserves comments that are not active heading fold metadata")
+        }
+        expect(Note(text: "# Title <!-- review me -->").wordCount == 3,
+               "Ordinary user comment words remain counted")
+        expect(Note(text: "# Note\n```\n## Example <!-- {\"fold\":true} -->\n```").wordCount == 4,
+               "Literal fold syntax in code remains part of the word count")
+        let spacedFold = Note(text: "# Title\t<!--  { \"fold\" : true }  -->\t\nBody")
+        expect(spacedFold.wordCount == 2 && spacedFold.characterCount == "# Title\t\t\nBody".count,
+               "Supported metadata whitespace is excluded while original surrounding tabs remain")
+
         let store = NoteStore(directory: directory, seed: false)
         expect(store.notes.isEmpty, "Unseeded store starts empty")
         expect(store.lastError == nil, "Fresh persistence succeeds")

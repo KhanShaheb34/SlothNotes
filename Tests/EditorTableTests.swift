@@ -74,6 +74,27 @@ enum EditorTableTests {
         editor.setText(table)
         editor.layoutSubtreeIfNeeded()
         editor.textView.mouseDown(with: event)
+        guard let draftField = editor.textView.subviews.compactMap({ $0 as? MarkdownTableCellEditor }).first,
+              let draftEditor = draftField.currentEditor() as? NSTextView else { fatalError("Missing native draft editor") }
+        draftEditor.insertText("A substantially longer first cell 🦥",
+                               replacementRange: NSRange(location: 0, length: (draftEditor.string as NSString).length))
+        draftEditor.doCommand(by: #selector(NSResponder.insertTab(_:)))
+        guard let nextDraft = editor.textView.subviews.compactMap({ $0 as? MarkdownTableCellEditor }).first,
+              let nextDraftEditor = nextDraft.currentEditor() as? NSTextView else { fatalError("Missing next draft editor") }
+        expect(nextDraftEditor.undoManager?.canUndo == false,
+               "A new cell keeps draft undo separate from committed note edits")
+        nextDraftEditor.undoManager?.undo()
+        expect(nextDraftEditor.string == "**Ready**" && editor.text.contains("A substantially longer first cell 🦥"),
+               "Undo in an untouched next cell preserves both cells")
+        nextDraftEditor.insertText("New second cell", replacementRange: NSRange(location: 0, length: (nextDraftEditor.string as NSString).length))
+        nextDraftEditor.undoManager?.undo()
+        expect(nextDraftEditor.string == "**Ready**", "Undo still restores edits made within the current table cell")
+        nextDraftEditor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+        window.undoManager?.undo()
+        expect(editor.text == table, "Starting and cancelling another cell preserves the committed note undo history")
+        editor.setText(table)
+        editor.layoutSubtreeIfNeeded()
+        editor.textView.mouseDown(with: event)
         editor.textView.subviews.compactMap { $0 as? MarkdownTableCellEditor }.first?.stringValue = "Saved before fold"
         expect(editor.toggleHeadingFold(atUTF16Index: 0), "A section with an active table cell can fold")
         expect(editor.text.contains("Saved before fold"), "Folding commits a pending cell before source offsets shift")

@@ -388,6 +388,90 @@ https://example.net/fenced
         expect(link(at: "Local") == nil && link(at: "Bear") == nil && link(at: "Unsafe") == nil, "Imported file, app and script schemes do not become actionable links")
         expect(link(at: "https://example.net/inline") == nil && link(at: "https://example.net/fenced") == nil, "Inline and fenced code links remain literal examples")
 
+        for (text, target) in [
+            ("https://en.wikipedia.org/wiki/Function_(mathematics)", "https://en.wikipedia.org/wiki/Function_(mathematics)"),
+            ("(https://example.com/a_(b)).", "https://example.com/a_(b)"),
+            ("https://example.com/outer_(inner_(value))", "https://example.com/outer_(inner_(value))"),
+            ("[Label](https://example.com/a_(b))suffix", "https://example.com/a_(b)")
+        ] {
+            editor.setText("# Links\n\(text)\n")
+            let start = (editor.textView.string as NSString).range(of: "https://").location
+            let actual = editor.textView.textStorage!.attribute(.link, at: start, effectiveRange: nil) as? URL
+            expect(actual?.absoluteString == target, "Bare URL detection preserves balanced parentheses and excludes enclosing syntax")
+            let last = start + (target as NSString).length - 1
+            expect(editor.textView.textStorage!.attribute(.link, at: last, effectiveRange: nil) as? URL == actual,
+                   "The complete balanced URL remains clickable")
+        }
+
+        for fence in ["```", "~~~"] {
+            let source = "# Local links\n\(fence)\ncode\n\(fence)\n[web](https://example.org)\n"
+            editor.setText(source)
+            let label = (source as NSString).range(of: "web")
+            editor.selectSourceRange(NSRange(location: label.location + 1, length: 0), scroll: false)
+            let code = (source as NSString).range(of: "code")
+            editor.selectSourceRange(NSRange(location: code.location + 1, length: 0), scroll: false)
+            let destination = (editor.textView.string as NSString).range(of: "https://example.org")
+            expect(link(at: "web")?.absoluteString == "https://example.org",
+                   "Moving from a link into preceding code preserves the link label's target")
+            expect(editor.textView.textStorage!.attribute(.markdownHiddenSyntax, at: destination.location, effectiveRange: nil) as? Bool == true,
+                   "Partial restyling keeps link destinations concealed after a closing fence")
+            expect(editor.text == source, "Moving between links and code preserves source text")
+            editor.textView.insertText("more ", replacementRange: editor.textView.selectedRange())
+            expect(link(at: "web")?.absoluteString == "https://example.org",
+                   "Editing preceding code keeps following link labels clickable")
+        }
+
+        for indentation in 1...3 {
+            let prefix = String(repeating: " ", count: indentation) + "## "
+            let source = "# Note\n\n\(prefix)Indented heading\nBody\n"
+            editor.setText(source)
+            editor.selectSourceRange(NSRange(location: (source as NSString).length, length: 0), scroll: false)
+            let title = (editor.textView.string as NSString).range(of: "Indented heading").location
+            let headingFont = editor.textView.textStorage!.attribute(.font, at: title, effectiveRange: nil) as? NSFont
+            expect(headingFont?.pointSize == editor.fontSize * 1.375, "Indented ATX headings receive their parsed heading level's font")
+            expect(editor.textView.textStorage!.attribute(.markdownHiddenSyntax, at: title - 1, effectiveRange: nil) as? Bool == true,
+                   "Indented heading hashes and whitespace disappear after typing")
+            expect(editor.textView.textStorage!.attribute(.markdownHiddenSyntax, at: title - prefix.utf16.count, effectiveRange: nil) as? Bool == true,
+                   "Heading indentation is concealed with its source prefix")
+            expect(editor.text == source, "Heading presentation preserves original indentation")
+        }
+        editor.setText("# Note\n    ## Four spaces\nEnd")
+        let fourSpaceHashes = (editor.textView.string as NSString).range(of: "## Four").location
+        expect(editor.textView.textStorage!.attribute(.markdownHiddenSyntax, at: fourSpaceHashes, effectiveRange: nil) == nil,
+               "Four leading spaces do not become an ATX heading")
+
+        for fence in ["```", "~~~"] {
+            for suffix in ["plain", "- [ ] Task", "[site](https://example.com)", "**bold**"] {
+                let original = "# Fence\n\(fence)\ncode\n"
+                editor.setText(original)
+                editor.selectSourceRange(NSRange(location: (original as NSString).length, length: 0), scroll: false)
+                window.undoManager?.beginUndoGrouping()
+                editor.textView.insertText(suffix, replacementRange: editor.textView.selectedRange())
+                window.undoManager?.endUndoGrouping()
+                expect(editor.text == original + suffix && editor.textView.string == original + suffix,
+                       "Typing at the end of an unfinished fence preserves literal source and projection")
+                let at = (original as NSString).length
+                let font = editor.textView.textStorage!.attribute(.font, at: at, effectiveRange: nil) as? NSFont
+                expect(font?.isFixedPitch == true && editor.renderedAttachmentCount == 0,
+                       "New code lines retain code styling and never become live checkboxes")
+                expect(editor.textView.textStorage!.attribute(.markdownCodeBlockID, at: at, effectiveRange: nil) != nil,
+                       "The code background extends through text appended at EOF")
+                expect(editor.textView.textStorage!.attribute(.link, at: at, effectiveRange: nil) == nil &&
+                       editor.textView.textStorage!.attribute(.markdownHiddenSyntax, at: at, effectiveRange: nil) == nil,
+                       "Appended Markdown inside code stays literal and noninteractive")
+                window.undoManager?.undo()
+                expect(editor.text == original, "Undo restores the exact unfinished code block")
+                window.undoManager?.redo()
+                expect(editor.text == original + suffix && editor.textView.string == original + suffix,
+                       "Redo restores the complete literal code line")
+            }
+        }
+        let closedFence = "# Fence\n```\ncode\n```\n"
+        editor.setText(closedFence)
+        editor.selectSourceRange(NSRange(location: (closedFence as NSString).length, length: 0), scroll: false)
+        editor.textView.insertText("- [ ] Outside", replacementRange: editor.textView.selectedRange())
+        expect(editor.renderedAttachmentCount == 1, "A task typed after a closed fence still becomes a checkbox")
+
         editor.isDark = true
         editor.fontSize = 18
         let rgb = editor.textView.insertionPointColor.usingColorSpace(.sRGB)!

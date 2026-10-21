@@ -12,6 +12,21 @@ enum EditorPresentationTests {
         guard range.location != NSNotFound, let storage = editor.textView.textStorage else { return false }
         return storage.attribute(NSAttributedString.Key("SlothHiddenSyntax"), at: range.location, effectiveRange: nil) as? Bool == true
     }
+    static func clickFirstDisclosure(in editor: MarkdownEditorView, window: NSWindow) -> Bool {
+        let character = (editor.textView.string as NSString).range(of: "\u{fffc}").location
+        guard character != NSNotFound, let manager = editor.textView.layoutManager, let container = editor.textView.textContainer else { return false }
+        manager.ensureLayout(for: container)
+        let glyph = manager.glyphIndexForCharacter(at: character)
+        let frame = manager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+        let point = NSPoint(x: frame.midX + editor.textView.textContainerOrigin.x, y: frame.midY + editor.textView.textContainerOrigin.y)
+        let click = NSEvent.mouseEvent(with: .leftMouseDown, location: editor.textView.convert(point, to: nil), modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+        let release = NSEvent.mouseEvent(with: .leftMouseUp, location: click.locationInWindow, modifierFlags: [], timestamp: 0.1,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 2, clickCount: 1, pressure: 0)!
+        NSApp.postEvent(release, atStart: false)
+        editor.textView.mouseDown(with: click)
+        return true
+    }
     static func main() {
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
@@ -164,6 +179,82 @@ enum EditorPresentationTests {
                 expect(!editor.textView.string.contains("Body two") && editor.textView.string.contains("Body one"), "Context-menu folding targets the clicked section even when the caret is elsewhere")
             } else { expect(false, "Heading context menu offers folding") }
         } else { expect(false, "Native heading controls have layout") }
+        let boundaryFold = "# Note\n## Parent <!-- {\"fold\":true} -->\nBody 🦥\n### Child <!-- {\"fold\":true} -->\nNested বাংলা\n## Next\nAfter\n"
+        for command in ["backward", "forward", "lineBackward", "lineForward"] {
+            let backward = command == "backward" || command == "lineBackward"
+            editor.setText(boundaryFold)
+            let attachment = (editor.textView.string as NSString).range(of: "\u{fffc}")
+            let caret = NSRange(location: attachment.location + (backward ? 1 : 0), length: 0)
+            editor.textView.setSelectedRange(caret)
+            window.undoManager?.beginUndoGrouping()
+            switch command {
+            case "backward": editor.textView.deleteBackward(nil)
+            case "forward": editor.textView.deleteForward(nil)
+            case "lineBackward": editor.textView.deleteToBeginningOfLine(nil)
+            default: editor.textView.deleteToEndOfLine(nil)
+            }
+            window.undoManager?.endUndoGrouping()
+            expect(editor.text.contains("Body 🦥") && editor.text.contains("Nested বাংলা"),
+                   "Deleting beside a collapsed disclosure preserves all hidden source text")
+            expect(editor.textView.string.contains("Body 🦥") && !editor.textView.string.contains("Nested বাংলা"),
+                   "Deleting beside a fold expands only that section and keeps nested folds intact")
+            let expanded = editor.text
+            window.undoManager?.undo()
+            expect(editor.text == boundaryFold && editor.textView.selectedRange() == caret,
+                   "One undo restores the fold and its original boundary caret")
+            window.undoManager?.redo()
+            expect(editor.text == expanded, "Redo restores boundary expansion without deleting hidden content")
+        }
+        for offset in [-4, -1, 0, 1] {
+            editor.setText(boundaryFold)
+            let attachment = (editor.textView.string as NSString).range(of: "\u{fffc}")
+            editor.textView.setSelectedRange(NSRange(location: attachment.location + offset, length: 0))
+            window.undoManager?.beginUndoGrouping()
+            editor.textView.insertNewline(nil)
+            window.undoManager?.endUndoGrouping()
+            expect(editor.text.contains("Body 🦥") && editor.text.contains("Nested বাংলা") && !editor.textView.string.contains("<!--"),
+                   "Return beside a fold preserves hidden text without exposing a detached persistence marker")
+            expect(editor.textView.string.contains("Body 🦥"), "Return beside a disclosure expands the edited section")
+            window.undoManager?.undo()
+            expect(editor.text == boundaryFold, "One undo restores a folded section after boundary Return")
+        }
+        editor.setText(boundaryFold)
+        let sectionStart = (boundaryFold as NSString).range(of: "## Parent").location
+        let sectionEnd = (boundaryFold as NSString).range(of: "## Next").location
+        editor.selectSourceRange(NSRange(location: sectionStart, length: sectionEnd - sectionStart), scroll: false)
+        window.undoManager?.beginUndoGrouping()
+        editor.textView.insertText("", replacementRange: editor.textView.selectedRange())
+        window.undoManager?.endUndoGrouping()
+        expect(editor.text == "# Note\n## Next\nAfter\n", "An explicitly selected complete folded section remains intentionally deletable")
+        window.undoManager?.undo()
+        expect(editor.text == boundaryFold, "Undo restores an explicitly deleted folded section exactly")
+
+        let readOnlyExpanded = "# Note\nIntro\n## Parent\nBody 🦥\n### Child\nNested বাংলা\n## Next\nAfter\n"
+        editor.setText(readOnlyExpanded)
+        editor.setEditable(false)
+        expect(editor.toggleHeadingFold(atUTF16Index: (readOnlyExpanded as NSString).range(of: "## Parent").location),
+               "Read-only notes can temporarily fold an originally expanded heading")
+        expect(!editor.textView.string.contains("Body 🦥") && editor.text == readOnlyExpanded,
+               "A temporary read-only fold hides content while preserving exact stored source")
+        expect(clickFirstDisclosure(in: editor, window: window), "A temporary read-only fold has a clickable native disclosure")
+        expect(editor.textView.string.contains("Nested বাংলা"), "Clicking a temporary read-only fold restores nested visible content")
+        editor.setAllHeadingsFolded(true)
+        expect(!editor.textView.string.contains("Intro") && !editor.textView.string.contains("Body 🦥"),
+               "Read-only Fold All hides sections that have no saved fold markers")
+        editor.setAllHeadingsFolded(false)
+        expect(editor.textView.string.contains("Nested বাংলা") && editor.text == readOnlyExpanded,
+               "Read-only Unfold All restores content without writing any fold markers")
+        editor.setAllHeadingsFolded(true)
+        editor.setEditable(true)
+        expect(editor.textView.string.contains("Body 🦥"), "Returning to editing restores persisted fold state instead of stale temporary overrides")
+        window.undoManager?.beginUndoGrouping()
+        editor.setAllHeadingsFolded(true)
+        window.undoManager?.endUndoGrouping()
+        let savedReadOnlyFold = editor.text
+        editor.setEditable(false)
+        window.undoManager?.undo()
+        expect(editor.text == savedReadOnlyFold, "Undo cannot mutate stored fold state while the editor is read-only")
+        editor.setEditable(true)
         let numbered = "# Note\nIssue #17 and #১৭ with #work2026 and #project/123.\nEnd"
         editor.setText(numbered)
         for plain in ["#17", "#১৭"] {

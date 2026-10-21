@@ -26,7 +26,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     private var attachmentPreview: AttachmentPreviewWindowController?
     private var tableEditor: MarkdownTableCellEditor?
     private var tableEditingSourceIndex: Int?
-    private var expandedReadOnlyFolds = Set<Int>()
+    private var readOnlyFoldOverrides: [Int: Bool] = [:]
     private var composingSelection: NSRange?
     private var disabledCompositionUndo = false
     private var lastContentWidth: CGFloat = 0
@@ -159,7 +159,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         isUpdating = true
         markdown = text
         codeHighlights.removeAll()
-        expandedReadOnlyFolds.removeAll()
+        readOnlyFoldOverrides.removeAll()
         let initial = Self.expression("^ {0,3}#{1,6}[ \t]+").firstMatch(in: text, range: NSRange(location: 0, length: (text as NSString).length))?.range.length ?? 0
         rebuildProjection(sourceSelection: NSRange(location: initial, length: 0))
         textView.undoManager?.removeAllActions()
@@ -190,6 +190,10 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     func setEditable(_ editable: Bool) {
         if !editable && textView.isEditable { finishPendingComposition() }
         textView.isEditable = editable
+        if editable && !readOnlyFoldOverrides.isEmpty {
+            readOnlyFoldOverrides.removeAll()
+            rebuildProjection()
+        }
     }
 
     func selectSourceRange(_ range: NSRange, scroll: Bool = true) {
@@ -198,7 +202,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         // selection restoration and copying an entire note keep folds intact.
         if scroll {
             while let heading = presentation.headings.first(where: {
-                $0.isFolded && !expandedReadOnlyFolds.contains($0.range.location) && NSLocationInRange(target.location, $0.bodyRange) && NSMaxRange(target) <= NSMaxRange($0.bodyRange)
+                isHeadingFolded($0) && NSLocationInRange(target.location, $0.bodyRange) && NSMaxRange(target) <= NSMaxRange($0.bodyRange)
             }) {
                 let previousLength = (markdown as NSString).length
                 guard toggleHeadingFold(atUTF16Index: heading.range.location) else { break }
@@ -237,6 +241,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         guard textView.isEditable else { return false }
         if (textView as? MarkdownTextView)?.isHandlingMarkedText == true || textView.hasMarkedText() { return true }
         guard let replacementString else { return false }
+        if editFoldBoundary(in: affectedCharRange, replacement: replacementString) { return false }
         let range = sourceRange(for: affectedCharRange)
         replace(range, with: replacementString,
                 selection: NSRange(location: range.location + (replacementString as NSString).length, length: 0),
@@ -382,7 +387,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         guard let view = textView as? MarkdownTextView else { return }
         view.headingControls = presentation.headings.filter { heading in
             heading.bodyRange.length > 0 && !tokens.contains { $0.kind == .fold && NSLocationInRange(heading.range.location, $0.sourceRange) }
-        }.map { (displayRange(for: $0.contentRange), $0.range.location, $0.isFolded && !expandedReadOnlyFolds.contains($0.range.location), NSMaxRange(displayRange(for: $0.bodyRange))) }
+        }.map { (displayRange(for: $0.contentRange), $0.range.location, isHeadingFolded($0), NSMaxRange(displayRange(for: $0.bodyRange))) }
         view.foldControlColor = isDark ? NSColor(white: 0.7, alpha: 1) : NSColor(white: 0.42, alpha: 1)
         view.window?.invalidateCursorRects(for: view)
         view.needsDisplay = true
@@ -401,7 +406,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         finishPendingComposition()
         guard !textView.hasMarkedText() else { return }
         if !textView.isEditable {
-            expandedReadOnlyFolds = folded ? [] : Set(presentation.headings.filter(\.isFolded).map { $0.range.location })
+            readOnlyFoldOverrides = Dictionary(uniqueKeysWithValues: presentation.headings.filter { $0.bodyRange.length > 0 }.map { ($0.range.location, folded) })
             rebuildProjection()
             return
         }
@@ -445,15 +450,67 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
               let heading = presentation.headings.first(where: { NSLocationInRange(target, $0.range) }),
               heading.bodyRange.length > 0 else { return false }
         if !textView.isEditable {
-            guard heading.isFolded else { return false }
-            if expandedReadOnlyFolds.contains(heading.range.location) { expandedReadOnlyFolds.remove(heading.range.location) }
-            else { expandedReadOnlyFolds.insert(heading.range.location) }
+            readOnlyFoldOverrides[heading.range.location] = !isHeadingFolded(heading)
             rebuildProjection()
             return true
         }
         let edit = foldEdit(for: heading, folded: !heading.isFolded)
         return replace(edit.range, with: edit.replacement, selection: NSRange(location: heading.range.location, length: 0),
                        actionName: heading.isFolded ? "Unfold Section" : "Fold Section", scrollToSelection: false)
+    }
+
+    private func isHeadingFolded(_ heading: MarkdownPresentation.Heading) -> Bool {
+        readOnlyFoldOverrides[heading.range.location] ?? heading.isFolded
+    }
+
+    /// A temporary read-only fold starts at the heading's paragraph break when
+    /// there is no saved marker. The attachment still retains the exact source.
+    private func foldedSourceRange(for heading: MarkdownPresentation.Heading) -> NSRange {
+        let source = markdown as NSString
+        var start = heading.foldMarkerRange?.location ?? NSMaxRange(heading.range)
+        if heading.foldMarkerRange == nil {
+            while start > heading.range.location && [10, 13].contains(Int(source.character(at: start - 1))) { start -= 1 }
+        }
+        var end = NSMaxRange(heading.bodyRange)
+        // Keep one paragraph break after the inline disclosure attachment.
+        if end > start && source.character(at: end - 1) == 10 { end -= 1 }
+        if end > start && source.character(at: end - 1) == 13 { end -= 1 }
+        return NSRange(location: start, length: max(0, end - start))
+    }
+
+    /// A collapsed disclosure represents text the user cannot see. A blind
+    /// Delete/Backspace reveals it first; Return expands and rebases its caret
+    /// before inserting, preventing fold metadata from becoming visible text.
+    private func editFoldBoundary(in affectedRange: NSRange, replacement: String) -> Bool {
+        let insertingLineBreak = replacement.rangeOfCharacter(from: .newlines) != nil
+        guard textView.selectedRange().length == 0, replacement.isEmpty || insertingLineBreak else { return false }
+        let originalCaret = sourceOffset(forDisplayOffset: textView.selectedRange().location)
+        guard let token = tokens.first(where: { token in
+                  guard token.kind == .fold else { return false }
+                  if replacement.isEmpty { return NSIntersectionRange(affectedRange, token.displayRange).length > 0 }
+                  let headingStart = (markdown as NSString).lineRange(for: NSRange(location: token.sourceRange.location, length: 0)).location
+                  return affectedRange.length == 0 && insertingLineBreak &&
+                      originalCaret >= headingStart && affectedRange.location <= NSMaxRange(token.displayRange)
+              }),
+              let heading = presentation.headings.first(where: {
+                  isHeadingFolded($0) && foldedSourceRange(for: $0).location == token.sourceRange.location
+              }) else { return false }
+        let edit = foldEdit(for: heading, folded: false)
+        let delta = (edit.replacement as NSString).length - edit.range.length
+        func rebased(_ offset: Int) -> Int {
+            if offset <= edit.range.location { return offset }
+            if offset < NSMaxRange(edit.range) { return edit.range.location }
+            return offset + delta
+        }
+        let caret = rebased(originalCaret)
+        var next = (markdown as NSString).replacingCharacters(in: edit.range, with: edit.replacement)
+        if !replacement.isEmpty {
+            next = (next as NSString).replacingCharacters(in: NSRange(location: caret, length: 0), with: replacement)
+        }
+        commit(next, selection: NSRange(location: caret + (replacement as NSString).length, length: 0),
+               actionName: replacement.isEmpty ? "Unfold Section" : "Edit Note")
+        textView.scrollRangeToVisible(textView.selectedRange())
+        return true
     }
 
     private static var expressions: [String: NSRegularExpression] = [:]
@@ -491,14 +548,9 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         for reference in AttachmentStore.references(in: value, ignoring: ignored) where reference.path.hasPrefix("attachments/") {
             candidates.append((reference.range, reference.isImage ? .image : .file, false, reference.path, reference.label))
         }
-        for heading in presentation.headings where heading.isFolded && !expandedReadOnlyFolds.contains(heading.range.location) && heading.bodyRange.length > 0 {
-            guard let marker = heading.foldMarkerRange else { continue }
-            var end = NSMaxRange(heading.bodyRange)
-            let original = markdown as NSString
-            // Keep one paragraph break after the inline disclosure attachment.
-            if end > marker.location && original.character(at: end - 1) == 10 { end -= 1 }
-            if end > marker.location && original.character(at: end - 1) == 13 { end -= 1 }
-            let range = NSRange(location: marker.location - sourceOffset, length: end - marker.location)
+        for heading in presentation.headings where isHeadingFolded(heading) && heading.bodyRange.length > 0 {
+            let hidden = foldedSourceRange(for: heading)
+            let range = NSRange(location: hidden.location - sourceOffset, length: hidden.length)
             guard range.location >= 0, NSMaxRange(range) <= source.length else { continue }
             candidates.append((range, .fold, false, nil, nil))
         }
@@ -583,11 +635,9 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         // Tokens still refer to the previous source here, so the old region can
         // be translated before offsets are adjusted for the edit.
         let oldDisplay = displayRange(for: oldRegion)
-        fencedCodeRanges = fencedCodeRanges.map { range in
-            if range.location >= NSMaxRange(edit.range) { return NSRange(location: range.location + delta, length: range.length) }
-            if NSMaxRange(range) > edit.range.location { return NSRange(location: range.location, length: range.length + delta) }
-            return range
-        }
+        // An unfinished fence grows when typing exactly at its old EOF. Reuse
+        // the updated parser ranges so that new lines remain literal code.
+        fencedCodeRanges = nextPresentation.codeBlocks.map(\.range)
         let projected = projection(for: fragment, sourceOffset: newRegion.location, displayOffset: oldDisplay.location)
         let displayDelta = projected.text.length - oldDisplay.length
         var updated = tokens.filter { NSMaxRange($0.sourceRange) <= oldRegion.location }
@@ -666,7 +716,8 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             let overlap = NSIntersectionRange(displayRange(for: range), full)
             return overlap.length > 0 ? NSRange(location: overlap.location - full.location, length: overlap.length) : nil
         }
-        let literalRanges = AttachmentStore.codeRanges(in: localText, fences: localFences).map {
+        let localLiteralRanges = AttachmentStore.codeRanges(in: localText, fences: localFences)
+        let literalRanges = localLiteralRanges.map {
             NSRange(location: full.location + $0.location, length: $0.length)
         }
         func literal(_ range: NSRange) -> Bool {
@@ -718,7 +769,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             paragraph.paragraphSpacing = 16
             style([.font: NSFont.systemFont(ofSize: fontSize * 1.75, weight: .semibold), .paragraphStyle: paragraph], first)
         }
-        matches("^(#{1,6})([ \\t]+)(.+)$") { match in
+        matches("^ {0,3}(#{1,6})([ \\t]+)(.+)$") { match in
             let level = match.range(at: 1).length
             let scale: CGFloat = level == 1 ? 1.75 : level == 2 ? 1.375 : level == 3 ? 1.2 : 1.06
             let paragraph = NSMutableParagraphStyle()
@@ -726,7 +777,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             paragraph.paragraphSpacingBefore = level == 1 ? 0 : 14
             paragraph.paragraphSpacing = 10
             style([.font: NSFont.systemFont(ofSize: fontSize * scale, weight: .semibold), .paragraphStyle: paragraph], match.range)
-            let prefix = NSUnionRange(match.range(at: 1), match.range(at: 2))
+            let prefix = NSRange(location: match.range.location, length: NSMaxRange(match.range(at: 2)) - match.range.location)
             if !literal(prefix) {
                 conceal([prefix], within: prefix)
             }
@@ -776,7 +827,9 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             style([.foregroundColor: secondary], match.range(at: 4)); dim(match, [1, 3, 5])
         }
         let scopedText = content.substring(with: full)
-        for reference in AttachmentStore.references(in: scopedText) {
+        // A partial redraw may begin inside a fence. Preserve the document's
+        // code context instead of treating its closing fence as a new opener.
+        for reference in AttachmentStore.references(in: scopedText, ignoring: localLiteralRanges) {
             let outer = NSRange(location: full.location + reference.range.location, length: reference.range.length)
             let label = NSRange(location: full.location + reference.labelRange.location, length: reference.labelRange.length)
             conceal([NSRange(location: outer.location, length: label.location - outer.location),
@@ -788,8 +841,19 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
                 style([.foregroundColor: accent, .link: url], range)
             }
         }
-        matches("(?:https?://|mailto:)[^\\s<>\\])]+", options: []) { match in
-            var destination = content.substring(with: match.range)
+        matches("(?:https?://|mailto:)[^\\s<>\\]]+", options: []) { match in
+            var destination = ""
+            var parentheses = 0
+            for character in content.substring(with: match.range) {
+                if character == "(" { parentheses += 1 }
+                if character == ")" {
+                    // Keep balanced URL parentheses, but stop before enclosing
+                    // prose or the closing delimiter of a Markdown link.
+                    guard parentheses > 0 else { break }
+                    parentheses -= 1
+                }
+                destination.append(character)
+            }
             while let last = destination.last, ".,;".contains(last) { destination.removeLast() }
             if let url = webLink(destination) {
                 style([.foregroundColor: accent, .link: url], NSRange(location: match.range.location, length: (destination as NSString).length))
@@ -1027,6 +1091,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     }
 
     private func commit(_ value: String, selection: NSRange, actionName: String, previousSelection: NSRange? = nil, edit: SourceEdit? = nil) {
+        guard textView.isEditable else { return }
         guard value != markdown else { selectSourceRange(selection); return }
         let previousText = markdown
         let previousRange = previousSelection ?? selectedSourceRange
@@ -1151,7 +1216,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             return true
         }
         if token.kind == .fold {
-            if let heading = presentation.headings.first(where: { $0.foldMarkerRange?.location == token.sourceRange.location }) {
+            if let heading = presentation.headings.first(where: { isHeadingFolded($0) && foldedSourceRange(for: $0).location == token.sourceRange.location }) {
                 return toggleHeadingFold(atUTF16Index: heading.range.location)
             }
             return true

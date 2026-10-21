@@ -56,6 +56,10 @@ final class MarkdownTableCellEditor: NSTextField, NSTextFieldDelegate {
     var onCommit: ((String, Int) -> Void)?
     var onCancel: (() -> Void)?
     private var completed = false
+    // The shared AppKit field editor otherwise falls through to the note's undo
+    // history. Keep its unfinished draft separate until the cell is committed.
+    private let draftUndoManager = UndoManager()
+    override var undoManager: UndoManager? { draftUndoManager }
 
     init(frame: NSRect, text: String, fontSize: CGFloat, dark: Bool,
          alignment: NSTextAlignment = .left) {
